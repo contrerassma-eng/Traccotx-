@@ -1,8 +1,8 @@
-// Tracco Tx - Edge Function v12 (Deno / Supabase)
-// v12: selector de empresa correcto = mipeSelEmpresa.cgi?DESDE_DONDE_URL=OPCION=1&TIPO=4
-// (URL real capturada del navegador). seleccionarEmpresa lee ese form, elige la
-// opcion del RUT y postea el "Enviar" para fijar la empresa, antes de listar/bajar
-// el ZIP de litros. RUT por ?rut= o secreto RUT_CONTRIBUYENTE.
+// Tracco Tx - Edge Function v13 (Deno / Supabase)
+// v13: seleccion de empresa OK y la lista carga (25KB). El link de descarga de la
+// pagina trae DOWNLOAD vacio (el boton "Archivo Respaldo" lo setea a XML por JS),
+// asi que se fuerza DOWNLOAD=XML para bajar el respaldo con litros.
+// (v12 fijo el selector real mipeSelEmpresa.cgi). RUT por ?rut= o secreto.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -283,9 +283,13 @@ async function bajarRespaldoZip(rutCompleto: string, periodo: string, jar: Jar, 
 
   // Paso 2: descargar. Si el portal expuso un link real, usamos ESE (trae los
   // parametros exactos que el SII espera); si no, caemos al armado manual.
-  const url = linkMatch
+  let url = linkMatch
     ? new URL(linkMatch[0].replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString()
     : "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
+  // El link de la pagina trae DOWNLOAD vacio (el boton "Archivo Respaldo" lo setea
+  // a XML por JS). Forzar DOWNLOAD=XML para bajar el respaldo de XML (con litros).
+  url = /DOWNLOAD=/i.test(url) ? url.replace(/DOWNLOAD=[^&]*/i, "DOWNLOAD=XML") : url + "&DOWNLOAD=XML";
+  logs.push("      URL descarga: " + url);
   const r = await fetchJar(jar, url, { method: "GET", headers: { "User-Agent": UA, "Referer": seedUrl } });
   const ct = r.headers.get("content-type") || "";
   const buf = new Uint8Array(await r.arrayBuffer());
