@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { supabase } from "../../lib/supabaseClient";
+import { supabase, FUNCTIONS_URL } from "../../lib/supabaseClient";
 
 type Periodo = {
   periodo: string;
@@ -20,6 +20,37 @@ export default function Dashboard() {
   const [estado, setEstado] = useState("Cargando…");
   const [empresas, setEmpresas] = useState<Empresa[]>([]);
   const [rut, setRut] = useState<string>("");
+  const [periodo, setPeriodo] = useState<string>("");
+  const [sincronizando, setSincronizando] = useState(false);
+  const [msg, setMsg] = useState<string>("");
+
+  async function cargar() {
+    if (!rut) return;
+    const { data, error } = await supabase
+      .from("tx_periodos")
+      .select("periodo, litros, iepd_total, credito_544, ingresos, ingreso_por_litro")
+      .eq("rut", rut)
+      .order("periodo", { ascending: false })
+      .limit(24);
+    if (error) setEstado("No se pudo cargar: " + error.message);
+    else { setRows(data || []); setEstado((data || []).length ? "" : "Aún no hay periodos. Usa “Actualizar mes”."); }
+  }
+
+  async function actualizar() {
+    if (!rut || !/^\d{6}$/.test(periodo)) { setMsg("Indica el periodo AAAAMM (ej. 202605)"); return; }
+    setSincronizando(true); setMsg("Sincronizando con el SII… (puede tardar)");
+    try {
+      const { data: s } = await supabase.auth.getSession();
+      const token = s.session?.access_token || "";
+      const r = await fetch(FUNCTIONS_URL + "/tracco-ingesta?rut=" + encodeURIComponent(rut) + "&periodo=" + periodo, {
+        method: "POST", headers: { Authorization: "Bearer " + token },
+      });
+      const d = await r.json();
+      if (d.ok) { const x = d.resumen?.[0]; setMsg(`✓ ${x?.facturas ?? 0} facturas, ${x?.litrosTotal ?? 0} L, crédito $${(x?.credito544 ?? 0).toLocaleString("es-CL")}`); await cargar(); }
+      else setMsg("✗ " + (d.error || "error"));
+    } catch (e) { setMsg("✗ Error de red"); }
+    finally { setSincronizando(false); }
+  }
 
   useEffect(() => {
     try { setEmpresas(JSON.parse(localStorage.getItem("tx_empresas") || "[]")); } catch { /* */ }
@@ -27,19 +58,16 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    // Periodo por defecto = mes anterior.
+    const h = new Date(); let y = h.getFullYear(), m = h.getMonth(); if (m === 0) { m = 12; y -= 1; }
+    setPeriodo("" + y + String(m).padStart(2, "0"));
+  }, []);
+
+  useEffect(() => {
     if (!rut) return;
     localStorage.setItem("tx_rut", rut);
-    (async () => {
-      setEstado("Cargando…");
-      const { data, error } = await supabase
-        .from("tx_periodos")
-        .select("periodo, litros, iepd_total, credito_544, ingresos, ingreso_por_litro")
-        .eq("rut", rut)
-        .order("periodo", { ascending: false })
-        .limit(24);
-      if (error) setEstado("No se pudo cargar (revisa sesión/permisos): " + error.message);
-      else { setRows(data || []); setEstado((data || []).length ? "" : "Aún no hay periodos cargados para este RUT. Ejecuta la ingesta del SII."); }
-    })();
+    setEstado("Cargando…");
+    cargar();
   }, [rut]);
 
   const clp = (n: number | null) => (n == null ? "—" : "$" + n.toLocaleString("es-CL"));
@@ -64,6 +92,22 @@ export default function Dashboard() {
           <a href="/" style={{ color: "#9aa6c4", fontSize: 13 }}>Salir</a>
         </div>
       </header>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
+        <input
+          value={periodo}
+          onChange={(e) => setPeriodo(e.target.value.replace(/\D/g, "").slice(0, 6))}
+          placeholder="AAAAMM"
+          style={{ width: 110, padding: 8, borderRadius: 8, border: "1px solid #2a3658", background: "#0e1530", color: "#e8ecf5" }}
+        />
+        <button
+          onClick={actualizar}
+          disabled={sincronizando}
+          style={{ padding: "8px 14px", border: 0, borderRadius: 8, background: "#3b6cff", color: "#fff", fontWeight: 600, cursor: "pointer", opacity: sincronizando ? 0.6 : 1 }}
+        >
+          {sincronizando ? "Sincronizando…" : "Actualizar mes"}
+        </button>
+        {msg && <span style={{ fontSize: 13, color: "#cdd6ef" }}>{msg}</span>}
+      </div>
       {estado && <p style={{ color: "#9aa6c4" }}>{estado}</p>}
       {rows.length > 0 && (
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
