@@ -1,9 +1,8 @@
-// Tracco Tx - Edge Function v16 (Deno / Supabase)
-// v16: parser universal de litros + auto-sanacion. parseXmlLitros soporta el formato
-// estandar (<QtyItem>) y el de COPEC (linea con <CodImpAdic>28</CodImpAdic> y litros
-// en el texto de <DscItem>). Si un proveedor trae OTRA estructura, su <Documento>
-// crudo se devuelve en "sinParser" + un "promptPatch" para generar la regla con IA.
-// Barrido de ventanas crecientes para cubrir el tope ~20 docs. RUT: ?rut= o secreto.
+// Tracco Tx - Edge Function v17 (Deno / Supabase)
+// v17: descarga dirigida suave (1 por mes+TPO_DOC, con pausa) para no gatillar el
+// rate-limit del SII (que degradaba hasta el login). Mantiene el parser universal
+// (estandar <QtyItem> + COPEC <CodImpAdic>28</CodImpAdic>/<DscItem>) y la auto-
+// sanacion (sinParser + promptPatch con el XML crudo). RUT: ?rut= o secreto.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -205,6 +204,7 @@ function parseXmlLitros(xml: string, map: Record<string, number>) {
 }
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Frasco de cookies + fetch que sigue redirects manualmente acumulando cookies (Deno no maneja jar).
 class Jar {
   cookies = new Map<string, string>();
@@ -348,28 +348,25 @@ async function obtenerLitros(rutCompleto: string, periodo: string, diesel: any[]
   // Descarga dirigida con ventanas CRECIENTES para los folios sin litros, sin filtro
   // por proveedor (el SII rechaza RUT_EMI/FOLIO). Se itera ampliando el rango hasta
   // cazar el folio: dia exacto -> mes del documento -> mes del doc hasta fin periodo.
-  const dl = (fd: string, fh: string) => "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + fd + "&FEC_HASTA=" + fh + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
-  const rangosHechos = new Set<string>();
+  // Descarga dirigida: UNA por (mes de emision, tipo de documento). Filtrar TPO_DOC
+  // reduce el set y evita el tope ~20 docs. Con pausa entre requests para no gatillar
+  // el rate-limit del SII (que degrada hasta el login).
+  const dl = (fd: string, fh: string, tpo: string) => "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + fd + "&FEC_HASTA=" + fh + "&TPO_DOC=" + tpo + "&ESTADO=&ORDEN=&DOWNLOAD=XML";
+  const hechos = new Set<string>();
   for (const d of diesel) {
     if (map[d.folio] != null) continue;
     const fp = String(d.fecha || "").split(/[/\-]/);
     if (fp.length !== 3 || !/^\d{4}$/.test(fp[2])) continue;
-    const dd = fp[0].padStart(2, "0"), mm = fp[1].padStart(2, "0"), yy = fp[2];
-    const lastm = String(new Date(+yy, +mm, 0).getDate()).padStart(2, "0");
-    const ventanas: [string, string][] = [
-      [yy + "-" + mm + "-" + dd, yy + "-" + mm + "-" + dd],
-      [yy + "-" + mm + "-01", yy + "-" + mm + "-" + lastm],
-      [yy + "-" + mm + "-01", hasta],
-    ];
-    for (const [fd, fh] of ventanas) {
-      if (map[d.folio] != null) break;
-      const key = fd + ".." + fh;
-      if (rangosHechos.has(key)) continue;
-      rangosHechos.add(key);
-      logs.push("      [dirigido] folio " + d.folio + " ventana " + key);
-      const m2 = await descargarParse(jar, dl(fd, fh), key, logs, wanted, muestras);
-      for (const k in m2) if (map[k] == null) map[k] = m2[k];
-    }
+    const mm = fp[1].padStart(2, "0"), yy = fp[2];
+    const tpo = String(d.tipoDoc || "").replace(/\D/g, "");
+    const fd = yy + "-" + mm + "-01";
+    const key = fd + "|" + tpo;
+    if (hechos.has(key)) continue;
+    hechos.add(key);
+    await sleep(800);
+    logs.push("      [dirigido] folio " + d.folio + " mes " + fd + " tpo " + tpo);
+    const m2 = await descargarParse(jar, dl(fd, hasta, tpo), key, logs, wanted, muestras);
+    for (const k in m2) if (map[k] == null) map[k] = m2[k];
   }
   const faltan = diesel.filter((x: any) => map[x.folio] == null);
   if (faltan.length) logs.push("      Folios sin litros tras barrido: " + faltan.map((x: any) => x.folio).join(", "));
