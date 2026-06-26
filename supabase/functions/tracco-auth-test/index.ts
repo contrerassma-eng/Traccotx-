@@ -1,4 +1,7 @@
-// Tracco Tx - Edge Function v8 (Deno / Supabase)
+// Tracco Tx - Edge Function v9 (Deno / Supabase)
+// v9: diagnostico de litros. mipeDownLoad devolvia "Error al contribuyente" (HTML
+// 957 bytes) pese a login OK. Se agrega mipeLaunchPage, se loguea el paso seed y
+// el error completo, y se extrae del HTML el link de descarga REAL del portal.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -210,14 +213,39 @@ async function bajarRespaldoZip(rutCompleto: string, periodo: string, jar: Jar, 
   const y = periodo.slice(0, 4), m = periodo.slice(4, 6);
   const last = new Date(+y, +m, 0).getDate();
   const desde = y + "-" + m + "-01", hasta = y + "-" + m + "-" + String(last).padStart(2, "0");
-  await fetchJar(jar, "https://www1.sii.cl/cgi-bin/Portal001/mipeAdminDocsRcp.cgi?RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&NUM_PAG=1", { method: "GET", headers: { "User-Agent": UA } });
-  const url = "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
-  const r = await fetchJar(jar, url, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeAdminDocsRcp.cgi" } });
+  const dec = (b: Uint8Array) => new TextDecoder("iso-8859-1").decode(b).replace(/\s+/g, " ");
+
+  // Paso 0: visitar la página de lanzamiento del portal MIPYME (a veces requerido
+  // para que www1 acepte la sesión venida de zeusr antes de consultar/descargar).
+  try {
+    const lp = await fetchJar(jar, "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi?OPCION=1&TIPO=4", { method: "GET", headers: { "User-Agent": UA } });
+    logs.push("      mipeLaunchPage -> HTTP " + lp.status);
+    await lp.body?.cancel();
+  } catch (e) { logs.push("      (mipeLaunchPage fallo: " + (e as Error).message + ")"); }
+
+  // Paso 1: sembrar la sesión listando los documentos recibidos del rango.
+  // Logueamos la respuesta para saber si la sesión www1 quedo realmente activa
+  // y, sobre todo, para extraer el link de descarga REAL que arma el portal.
+  const seedUrl = "https://www1.sii.cl/cgi-bin/Portal001/mipeAdminDocsRcp.cgi?RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&NUM_PAG=1";
+  const sr = await fetchJar(jar, seedUrl, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi?OPCION=1&TIPO=4" } });
+  const seedBuf = new Uint8Array(await sr.arrayBuffer());
+  const seedTxt = dec(seedBuf);
+  logs.push("      mipeAdminDocsRcp (seed) -> HTTP " + sr.status + " | " + (sr.headers.get("content-type") || "") + " | " + seedBuf.length + " bytes");
+  logs.push("      seed (recorte): " + seedTxt.slice(0, 500));
+  const linkMatch = seedTxt.match(/mipeDownLoad\.cgi[^"'\s>)]*/i);
+  if (linkMatch) logs.push("      LINK REAL de descarga en la pagina: " + linkMatch[0]);
+
+  // Paso 2: descargar. Si el portal expuso un link real, usamos ESE (trae los
+  // parametros exactos que el SII espera); si no, caemos al armado manual.
+  const url = linkMatch
+    ? new URL(linkMatch[0].replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString()
+    : "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
+  const r = await fetchJar(jar, url, { method: "GET", headers: { "User-Agent": UA, "Referer": seedUrl } });
   const ct = r.headers.get("content-type") || "";
   const buf = new Uint8Array(await r.arrayBuffer());
   logs.push("      mipeDownLoad -> HTTP " + r.status + " | " + ct + " | " + buf.length + " bytes");
   if (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b) return buf;
-  logs.push("      (la respuesta no es ZIP) inicio: " + new TextDecoder().decode(buf.slice(0, 200)).replace(/\s+/g, " "));
+  logs.push("      (la respuesta no es ZIP) cuerpo: " + dec(buf).slice(0, 1500));
   return buf;
 }
 function litrosDesdeZip(buf: Uint8Array, logs: string[]): Record<string, number> {
