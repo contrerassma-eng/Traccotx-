@@ -1,8 +1,8 @@
-// Tracco Tx - Edge Function v10 (Deno / Supabase)
-// v10: el portal MIPYME exige SELECCIONAR EMPRESA (Enviar) tras el login porque el
-// contribuyente tiene varios RUT; sin eso daba "Error al contribuyente". Se agrega
-// seleccionarEmpresa() (lee el form, elige la opcion del RUT, postea) antes de
-// listar/descargar. El RUT es variable de entrada: ?rut= en la URL o secreto.
+// Tracco Tx - Edge Function v11 (Deno / Supabase)
+// v11: el SII confirmo "No ha seleccionado una Empresa". mipeLaunchPage no traia el
+// <form> esperado, asi que se vuelca su HTML completo para ubicar el form/select
+// real de seleccion de empresa. (v10 agrego seleccionarEmpresa; aqui se diagnostica
+// por que no encontro el formulario.) RUT por ?rut= o secreto RUT_CONTRIBUYENTE.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -217,9 +217,10 @@ async function seleccionarEmpresa(rutCompleto: string, jar: Jar, logs: string[])
   const r = await fetchJar(jar, "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi", { method: "GET", headers: { "User-Agent": UA } });
   const html = decFull(new Uint8Array(await r.arrayBuffer()));
   logs.push("      Seleccion empresa (mipeLaunchPage) -> HTTP " + r.status + " | " + html.length + " bytes");
+  logs.push("      launch HTML: " + html.replace(/\s+/g, " ").slice(0, 1200));
 
   const form = html.match(/<form[^>]*>[\s\S]*?<\/form>/i);
-  if (!form) { logs.push("      (no hay form de seleccion; quiza ya hay empresa fijada)"); return; }
+  if (!form) { logs.push("      (no hay form de seleccion en mipeLaunchPage)"); return; }
   const formHtml = form[0];
   const action = (formHtml.match(/action=["']?([^"'\s>]+)/i) || [])[1] || "mipeLaunchPage.cgi";
   const actionUrl = new URL(action.replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString();
