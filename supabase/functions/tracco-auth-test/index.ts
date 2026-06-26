@@ -1,9 +1,8 @@
-// Tracco Tx - Edge Function v14 (Deno / Supabase)
-// v14: robustez de litros. La descarga masiva trae ~20 docs y filtra por fecha de
-// emision, por lo que faltaban folios (ej. COPEC emitido el mes anterior). Ahora,
-// tras el respaldo masivo, se hace una descarga DIRIGIDA por proveedor+folio con
-// ventana desde el mes del documento, hasta cazar cada folio de diesel.
-// (v13 forzo DOWNLOAD=XML; v12 fijo el selector mipeSelEmpresa.cgi.) RUT: ?rut= o secreto.
+// Tracco Tx - Edge Function v15 (Deno / Supabase)
+// v15: barrido con ventanas crecientes (dia -> mes -> mes..fin periodo) iterando
+// hasta llenar los litros de cada folio (el RUT_EMI/FOLIO lo rechaza el SII). Ademas
+// vuelca la estructura del <Detalle> de folios sin litros para ajustar el parser
+// (COPEC trae otro formato). (v13 DOWNLOAD=XML; v12 selector mipeSelEmpresa.) RUT: ?rut= o secreto.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -260,13 +259,17 @@ async function seleccionarEmpresa(rutCompleto: string, jar: Jar, logs: string[])
   await pr.body?.cancel();
 }
 // Descarga una URL de mipeDownLoad y devuelve folio->litros (maneja ZIP o XML directo).
-async function descargarParse(jar: Jar, url: string, label: string, logs: string[]): Promise<Record<string, number>> {
+async function descargarParse(jar: Jar, url: string, label: string, logs: string[], wanted: string[] = []): Promise<Record<string, number>> {
   const r = await fetchJar(jar, url, { method: "GET", headers: { "User-Agent": UA } });
   const ct = r.headers.get("content-type") || "";
   const buf = new Uint8Array(await r.arrayBuffer());
   logs.push("      mipeDownLoad " + label + " -> HTTP " + r.status + " | " + ct + " | " + buf.length + " bytes");
-  if (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b) return litrosDesdeZip(buf, logs);
-  const txt = new TextDecoder("iso-8859-1").decode(buf);
+  let txt: string;
+  if (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b) {
+    const map = litrosDesdeZip(buf, logs);
+    return map;
+  }
+  txt = new TextDecoder("iso-8859-1").decode(buf);
   if (/Error al contribuyente|no ha seleccionado/i.test(txt)) {
     logs.push("      (error SII en " + label + "): " + txt.replace(/\s+/g, " ").slice(0, 160));
     return {};
@@ -274,6 +277,19 @@ async function descargarParse(jar: Jar, url: string, label: string, logs: string
   const map: Record<string, number> = {};
   parseXmlLitros(txt, map);
   logs.push("      " + label + ": " + Object.keys(map).length + " folios con litros");
+  // Diagnostico: si un folio buscado esta en el XML pero sin litros, volcar su
+  // estructura para ajustar el parser (ej. COPEC trae otro formato de <Detalle>).
+  for (const f of wanted) {
+    if (map[f] != null) continue;
+    const docs = txt.split(/<Documento[\s>]/);
+    for (const d of docs) {
+      if (d.indexOf("<Folio>" + f + "</Folio>") >= 0) {
+        const det = d.match(/<Detalle>[\s\S]*?<\/Detalle>/i);
+        logs.push("      [estructura folio " + f + "] " + (det ? det[0] : d.slice(0, 700)).replace(/\s+/g, " ").slice(0, 1100));
+        break;
+      }
+    }
+  }
   return map;
 }
 // Orquesta la obtencion de litros: selecciona empresa, baja el respaldo masivo del
@@ -301,23 +317,37 @@ async function obtenerLitros(rutCompleto: string, periodo: string, diesel: any[]
     ? new URL(linkMatch[0].replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString()
     : "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
   bulkUrl = /DOWNLOAD=/i.test(bulkUrl) ? bulkUrl.replace(/DOWNLOAD=[^&]*/i, "DOWNLOAD=XML") : bulkUrl + "&DOWNLOAD=XML";
-  const map = await descargarParse(jar, bulkUrl, "(masivo)", logs);
+  const wanted = diesel.map((x: any) => String(x.folio));
+  const map = await descargarParse(jar, bulkUrl, "(masivo)", logs, wanted);
 
-  // Descarga dirigida para los folios de diesel que aun no tienen litros.
+  // Descarga dirigida con ventanas CRECIENTES para los folios sin litros, sin filtro
+  // por proveedor (el SII rechaza RUT_EMI/FOLIO). Se itera ampliando el rango hasta
+  // cazar el folio: dia exacto -> mes del documento -> mes del doc hasta fin periodo.
+  const dl = (fd: string, fh: string) => "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + fd + "&FEC_HASTA=" + fh + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
+  const rangosHechos = new Set<string>();
   for (const d of diesel) {
     if (map[d.folio] != null) continue;
     const fp = String(d.fecha || "").split(/[/\-]/);
-    let d2 = desde;
-    if (fp.length === 3) { const mm = fp[1].padStart(2, "0"), yy = fp[2]; if (/^\d{4}$/.test(yy)) d2 = yy + "-" + mm + "-01"; }
-    for (const rutEmi of [String(d.rut || "").trim(), String(d.rut || "").split("-")[0].trim()]) {
-      if (!rutEmi) continue;
-      const turl = "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=" + encodeURIComponent(rutEmi) + "&FOLIO=" + encodeURIComponent(d.folio) + "&RZN_SOC=&FEC_DESDE=" + d2 + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
-      logs.push("      [dirigido] folio " + d.folio + " prov " + rutEmi + " (" + d2 + ".." + hasta + ")");
-      const m2 = await descargarParse(jar, turl, "folio " + d.folio, logs);
-      for (const k in m2) if (map[k] == null) map[k] = m2[k];
+    if (fp.length !== 3 || !/^\d{4}$/.test(fp[2])) continue;
+    const dd = fp[0].padStart(2, "0"), mm = fp[1].padStart(2, "0"), yy = fp[2];
+    const lastm = String(new Date(+yy, +mm, 0).getDate()).padStart(2, "0");
+    const ventanas: [string, string][] = [
+      [yy + "-" + mm + "-" + dd, yy + "-" + mm + "-" + dd],
+      [yy + "-" + mm + "-01", yy + "-" + mm + "-" + lastm],
+      [yy + "-" + mm + "-01", hasta],
+    ];
+    for (const [fd, fh] of ventanas) {
       if (map[d.folio] != null) break;
+      const key = fd + ".." + fh;
+      if (rangosHechos.has(key)) continue;
+      rangosHechos.add(key);
+      logs.push("      [dirigido] folio " + d.folio + " ventana " + key);
+      const m2 = await descargarParse(jar, dl(fd, fh), key, logs, wanted);
+      for (const k in m2) if (map[k] == null) map[k] = m2[k];
     }
   }
+  const faltan = diesel.filter((x: any) => map[x.folio] == null).map((x: any) => x.folio);
+  if (faltan.length) logs.push("      Folios sin litros tras barrido: " + faltan.join(", "));
   return map;
 }
 function litrosDesdeZip(buf: Uint8Array, logs: string[]): Record<string, number> {
