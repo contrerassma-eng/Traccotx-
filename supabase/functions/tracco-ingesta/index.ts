@@ -142,15 +142,16 @@ async function obtenerDetalle(periodo: string, compras: any[], jar: Jar, seed: R
   const hechos = new Set<string>();
   for (const d of diesel) {
     if (map[d.folio]?.litros > 0) continue;
-    const fp = String(d.fechaEmision || "").split("-"); // ISO yyyy-mm-dd
-    if (fp.length !== 3) continue;
-    const fd = fp[0] + "-" + fp[1].padStart(2, "0") + "-01";
+    const fday = String(d.fechaEmision || "").slice(0, 10); // yyyy-mm-dd exacto
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fday)) continue;
     const tpo = String(d.tipoDte || "").replace(/\D/g, "");
-    const key = fd + "|" + tpo;
+    // Ventana de UN DÍA (la fecha de emisión): evita el tope ~20 docs del SII en
+    // meses con muchos documentos (donde la ventana de mes completo vuelve vacía).
+    const key = fday + "|" + tpo;
     if (hechos.has(key)) continue;
     hechos.add(key);
-    await sleep(800);
-    merge(await descargarDte(jar, dl(fd, hasta, tpo)));
+    await sleep(700);
+    merge(await descargarDte(jar, dl(fday, fday, tpo)));
   }
   return map;
 }
