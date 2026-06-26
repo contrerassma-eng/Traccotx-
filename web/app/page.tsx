@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { FUNCTIONS_URL } from "../lib/supabaseClient";
+import { supabase, FUNCTIONS_URL } from "../lib/supabaseClient";
 
 // Login: valida RUT + clave contra el SII y exige correo autorizado.
 // Llama a la Edge Function tracco-login (a implementar en el backend).
@@ -23,6 +23,9 @@ export default function Login() {
       });
       const data = await r.json();
       if (data.ok) {
+        await supabase.auth.setSession({ access_token: data.access_token, refresh_token: data.refresh_token });
+        localStorage.setItem("tx_empresas", JSON.stringify(data.empresas || []));
+        localStorage.setItem("tx_rut", (data.ruts && data.ruts[0]) || "");
         setEstado("✓ Acceso concedido. Redirigiendo…");
         window.location.href = "/dashboard";
       } else {
