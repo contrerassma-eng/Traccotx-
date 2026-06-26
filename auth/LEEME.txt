@@ -6,9 +6,9 @@ se construye sobre seguro. Si el SII acepta el certificado, te imprime un TOKEN.
 ## Pasos (en tu PC Windows, con Node ya instalado)
 
 1. Descomprime `tracco-tx-auth.zip` en una carpeta, por ejemplo:
-   `C:\Users\crami\Downloads\tracco-tx`
+   `C:\Users\<tu-usuario>\Downloads\tracco-tx`
 
-2. Copia el certificado de Marcelo a esa carpeta y renómbralo a:
+2. Copia tu certificado digital a esa carpeta y renómbralo a:
    `certificado.pfx`
    (o déjalo donde está y luego pasas la ruta completa)
 
@@ -40,7 +40,7 @@ se construye sobre seguro. Si el SII acepta el certificado, te imprime un TOKEN.
 
 ```
 [1/4] Leyendo certificado…
-      Titular: MARCELO ANTONIO CONTRERAS MARTINEZ
+      Titular: NOMBRE DEL TITULAR DEL CERTIFICADO
 [2/4] Pidiendo SEMILLA al SII…
       Semilla: 0093847651
 [3/4] Firmando la semilla con el certificado…

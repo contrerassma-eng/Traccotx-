@@ -13,7 +13,9 @@ const readline = require('readline');
 const { leerPfx } = require('./pfx');
 const { pedirSemilla, firmarSemilla, pedirToken } = require('./sii-auth');
 
-const RUT = '10514666-3'; // Marcelo, solo para la prueba del RCV
+// RUT del contribuyente para la prueba extra del RCV (formato 12345678-9).
+// Se toma de la variable de entorno RUT; no se hardcodea ningún dato personal.
+const RUT = process.env.RUT || '';
 
 function preguntarOculto(texto) {
   return new Promise((resolve) => {
@@ -65,7 +67,13 @@ function preguntarOculto(texto) {
     console.log('========================================');
     console.log('\nEl certificado AUTENTICA contra el SII. La arquitectura web funciona.');
 
-    // 7) Prueba extra: ¿el token sirve en el RCV (www4)?
+    // 7) Prueba extra (opcional): ¿el token sirve en el RCV (www4)?
+    // Solo se ejecuta si defines la variable de entorno RUT (ej: RUT=12345678-9).
+    if (!RUT) {
+      console.log('\n[extra] Omitida la prueba del RCV: define RUT=12345678-9 para activarla.');
+      console.log('\nListo. Avísame qué imprimió y sigo con la bóveda y el resto.');
+      return;
+    }
     console.log('\n[extra] Probando si el token sirve en el Registro de Compras y Ventas…');
     try {
       const hoy = new Date();

@@ -1,7 +1,6 @@
 # Tracco Tx
 
-Automatización tributaria contra el **SII (Servicio de Impuestos Internos)** de Chile
-para Marcelo Contreras.
+Automatización tributaria contra el **SII (Servicio de Impuestos Internos)** de Chile.
 
 El proyecto se construye por pruebas incrementales. Cada pieza se valida antes de
 montar la siguiente encima:
@@ -42,6 +41,9 @@ La clave del certificado se pide en pantalla y **no se guarda en ningún archivo
 - **Nunca** se versiona el certificado ni la clave: el `.gitignore` bloquea
   `*.pfx`, `*.p12`, `*.pem`, `*.key`, `.env` y similares.
 - La clave del certificado se solicita interactivamente en cada ejecución.
+- No hay datos personales en el código (RUT, nombre ni usuario). El RUT para la
+  prueba opcional del RCV se entrega por variable de entorno:
+  `RUT=12345678-9 node test-auth.js`. Si no se define, esa prueba se omite.
 - El TOKEN del SII caduca en minutos; aun así no debe pegarse en sitios públicos.
 
 ## Notas técnicas
