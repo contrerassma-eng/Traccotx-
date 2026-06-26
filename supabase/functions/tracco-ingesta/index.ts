@@ -81,8 +81,16 @@ async function seleccionarEmpresa(rutCompleto: string, jar: Jar, dbg?: any): Pro
   for (const h of form[0].matchAll(/<input[^>]*>/gi)) { const tag = h[0]; if (!/type=["']?hidden/i.test(tag) && !/type=["']?submit/i.test(tag) && /type=/i.test(tag)) continue; const n = (tag.match(/name=["']?([^"'\s>]+)/i) || [])[1]; const v = (tag.match(/value=["']?([^"'>]*)/i) || [])[1] || ""; if (n) params.set(n, v.replace(/&amp;/g, "&")); }
   const rutNum = rutCompleto.split("-")[0].replace(/\D/g, ""); const rutDot = rutNum.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
   const sel = form[0].match(/<select[^>]*name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)<\/select>/i);
-  if (sel) { let chosen = "", first = ""; const opts: string[] = []; for (const o of sel[2].matchAll(/<option[^>]*value=["']?([^"'>]*)["']?[^>]*>([^<]*)</gi)) { const val = (o[1] || "").trim(), lab = (o[2] || "").trim(); opts.push(val + " :: " + lab); if (!first) first = val; if (val.includes(rutCompleto) || val.includes(rutNum) || lab.includes(rutNum) || lab.includes(rutDot)) { chosen = val; break; } } params.set(sel[1], chosen || first); if (dbg) dbg.opciones = opts, dbg.elegido = (chosen || first), dbg.match = !!chosen, dbg.selName = sel[1]; }
-  else if (dbg) dbg.selNoSelect = true;
+  // Nombre del campo de empresa (el selector real del SII es RUT_EMP).
+  const selName = sel ? sel[1] : "RUT_EMP";
+  let chosen = ""; const opts: string[] = [];
+  if (sel) { for (const o of sel[2].matchAll(/<option[^>]*value=["']?([^"'>]*)["']?[^>]*>([^<]*)</gi)) { const val = (o[1] || "").trim(), lab = (o[2] || "").trim(); opts.push(val + " :: " + lab); if (val.includes(rutCompleto) || val.includes(rutNum) || lab.includes(rutNum) || lab.includes(rutDot)) { chosen = val; break; } } }
+  // Forzamos la empresa = rutContrib aunque el parseo del dropdown no la haya visto
+  // (el SII valida que sea una empresa representada y la acepta). El valor del SII
+  // es el RUT con dígito verificador.
+  const elegido = chosen || rutCompleto;
+  params.set(selName, elegido);
+  if (dbg) dbg.opciones = opts, dbg.elegido = elegido, dbg.match = !!chosen, dbg.selName = selName;
   const pr = await fetchJar(jar, actionUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA, "Origin": "https://www1.sii.cl", "Referer": selUrl }, body: params.toString() }); if (dbg) dbg.postStatus = pr.status; await pr.body?.cancel();
   return true;
 }
