@@ -25,6 +25,20 @@ async function loginClave(rutCompleto: string, clave: string, jar: Jar): Promise
   await fetchJar(jar, "https://zeusr.sii.cl/cgi_AUT2000/CAutInicio.cgi", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA, "Origin": "https://zeusr.sii.cl", "Referer": "https://zeusr.sii.cl/cgi_AUT2000/CAutInicio.cgi" }, body });
   return jar.cookies.get("TOKEN") || "";
 }
+// Login con reintentos + espera creciente: cuando el SII está limitando, el login
+// vuelve sin TOKEN (solo cookies de balanceador). Esperamos y reintentamos con un
+// jar nuevo hasta conseguirlo, para no dejar el período vacío.
+async function loginConReintentos(rutCompleto: string, clave: string, max = 3): Promise<{ token: string; jar: Jar; intentos: number }> {
+  const esperas = [0, 12000, 28000, 45000];
+  let jar = new Jar();
+  for (let i = 0; i < max; i++) {
+    if (esperas[i]) await sleep(esperas[i]);
+    jar = new Jar();
+    const t = await loginClave(rutCompleto, clave, jar).catch(() => "");
+    if (t) return { token: t, jar, intentos: i + 1 };
+  }
+  return { token: "", jar, intentos: max };
+}
 // RCV compras del periodo usando el TOKEN de la sesion de clave (sin certificado).
 async function comprasRCV(jar: Jar, token: string, rutCompleto: string, periodo: string): Promise<any[]> {
   const [rut, dv] = rutCompleto.split("-");
@@ -167,10 +181,8 @@ Deno.serve(async (req: Request) => {
     const url = new URL(req.url);
     const rutContrib = (url.searchParams.get("rut") || "").trim();
     if (!rutContrib) return json({ ok: false, error: "Falta ?rut=" }, 400);
-    // RUT con el que se inicia sesion. Por defecto es el mismo contribuyente, pero
-    // para una EIRL sin Portal MIPYME se entra como su representante (persona
-    // natural, que si tiene MIPYME) y luego se selecciona la empresa = rutContrib.
-    const loginRut = (url.searchParams.get("loginRut") || rutContrib).trim();
+    // RUT con el que se inicia sesion (se resuelve abajo con tx_contribuyentes.login_rut).
+    const loginRutParam = (url.searchParams.get("loginRut") || "").trim();
     const claveSII = Deno.env.get("CLAVE_SII"); if (!claveSII) return json({ ok: false, error: "Falta CLAVE_SII" }, 500);
     const URL_S = Deno.env.get("SUPABASE_URL")!, KEY_S = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const admin = createClient(URL_S, KEY_S, { auth: { persistSession: false } });
@@ -188,15 +200,16 @@ Deno.serve(async (req: Request) => {
     else { const desde = (url.searchParams.get("desde") || "").replace(/\D/g, "").slice(0, 6), hasta = (url.searchParams.get("hasta") || "").replace(/\D/g, "").slice(0, 6); if (desde && hasta) { let y = +desde.slice(0, 4), m = +desde.slice(4, 6); const yh = +hasta.slice(0, 4), mh = +hasta.slice(4, 6); for (let i = 0; i < 60; i++) { meses.push("" + y + String(m).padStart(2, "0")); if (y === yh && m === mh) break; m++; if (m > 12) { m = 1; y++; } } } }
     if (!meses.length) return json({ ok: false, error: "Indica ?periodo=AAAAMM o ?desde=&hasta=" }, 400);
 
-    const { data: contrib } = await admin.from("tx_contribuyentes").select("tramo_iepd_pct").eq("rut", rutContrib).maybeSingle();
+    const { data: contrib } = await admin.from("tx_contribuyentes").select("tramo_iepd_pct, login_rut").eq("rut", rutContrib).maybeSingle();
     const tramo = Number(contrib?.tramo_iepd_pct ?? 80);
+    // RUT de login: ?loginRut= > login_rut configurado (representante) > el mismo RUT.
+    const loginRut = (loginRutParam || (contrib as any)?.login_rut || rutContrib).trim();
     const { data: cats } = await admin.from("tx_categorias").select("nombre, palabras_clave").is("rut", null);
     const catsOrd = (cats || []).filter((c: any) => c.nombre !== "Otros");
 
-    // UN solo login con clave para todo (RCV + DTE).
-    const jar = new Jar();
-    const token = await loginClave(loginRut, claveSII, jar);
-    if (!token) return json({ ok: false, error: "No se pudo autenticar con la clave (clave incorrecta o el SII está limitando; reintenta en un minuto)" }, 401);
+    // UN solo login con clave para todo (RCV + DTE), con reintentos si el SII limita.
+    const { token, jar, intentos } = await loginConReintentos(loginRut, claveSII);
+    if (!token) return json({ ok: false, error: "El SII está limitando el acceso (no entregó sesión tras varios intentos). Reintenta en un minuto.", rateLimited: true }, 503);
     const debug = url.searchParams.get("debug") === "1";
     const dbgSel: any = {};
     await seleccionarEmpresa(rutContrib, jar, debug ? dbgSel : undefined).catch(() => false); // selecciona empresa = rutContrib
@@ -238,7 +251,7 @@ Deno.serve(async (req: Request) => {
       if (debug) { dbgDet.dieselFolios = compras.filter((c) => (c.iepd || 0) > 0).map((c) => c.folio + "@" + c.fechaEmision + "/t" + c.tipoDte); }
       resumen.push({ periodo, compras: filas.length, ventas: ventas.length, conDetalle: Object.keys(detalle).length, iepdTotal, litrosTotal, credito544, ingresos, ingresoPorLitro, porCategoria: porCat, ...(debug ? { dbg: dbgDet } : {}) });
     }
-    return json({ ok: true, rut: rutContrib, via: "clave", meses: meses.length, ...(url.searchParams.get("debug") === "1" ? { dbgSel } : {}), resumen });
+    return json({ ok: true, rut: rutContrib, loginRut, loginIntentos: intentos, via: "clave", meses: meses.length, ...(url.searchParams.get("debug") === "1" ? { dbgSel } : {}), resumen });
   } catch (e) {
     return json({ ok: false, error: (e as Error).message }, 500);
   }

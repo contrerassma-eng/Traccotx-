@@ -158,14 +158,26 @@ export default function App() {
     const token = s.session?.access_token || "";
     for (let i = 0; i < lista.length; i++) {
       const per = lista[i];
-      setProg({ done: i, total: lista.length, label: per });
-      try {
-        const r = await fetch(FUNCTIONS_URL + "/tracco-ingesta?rut=" + encodeURIComponent(rut) + "&periodo=" + per, { method: "POST", headers: { Authorization: "Bearer " + token } });
-        const d = await r.json();
-        const x = d.ok ? d.resumen?.[0] : null;
-        setSyncLog((l) => [...l, d.ok ? `${per}  ✓  ${x?.compras ?? 0} compras · ${numL(x?.litrosTotal)} L · crédito ${clp(x?.credito544)}` : `${per}  ✗  ${d.error || "error"}`]);
-      } catch { setSyncLog((l) => [...l, `${per}  ✗  error de red`]); }
-      if (i < lista.length - 1) await new Promise((res) => setTimeout(res, 1200));
+      // Reintenta el mismo período si el SII limita, con espera creciente, para no
+      // dejarlo vacío. Hasta 4 intentos por período.
+      let logged = false;
+      for (let intento = 1; intento <= 4 && !logged; intento++) {
+        setProg({ done: i, total: lista.length, label: per + (intento > 1 ? ` (reintento ${intento})` : "") });
+        try {
+          const r = await fetch(FUNCTIONS_URL + "/tracco-ingesta?rut=" + encodeURIComponent(rut) + "&periodo=" + per, { method: "POST", headers: { Authorization: "Bearer " + token } });
+          const d = await r.json();
+          if (d.ok) {
+            const x = d.resumen?.[0];
+            setSyncLog((l) => [...l, `${per}  ✓  ${x?.compras ?? 0} compras · ${numL(x?.litrosTotal)} L · crédito ${clp(x?.credito544)}`]);
+            logged = true;
+          } else if (d.rateLimited || r.status === 503 || r.status === 429) {
+            // SII limitando: esperar más y reintentar el mismo período.
+            if (intento < 4) { setSyncLog((l) => [...l, `${per}  …  SII limitando, esperando para reintentar`]); await new Promise((res) => setTimeout(res, 15000 * intento)); }
+            else setSyncLog((l) => [...l, `${per}  ✗  el SII siguió limitando (queda pendiente, vuelve a sincronizar)`]);
+          } else { setSyncLog((l) => [...l, `${per}  ✗  ${d.error || "error"}`]); logged = true; }
+        } catch { if (intento >= 4) setSyncLog((l) => [...l, `${per}  ✗  error de red`]); else await new Promise((res) => setTimeout(res, 8000)); }
+      }
+      if (i < lista.length - 1) await new Promise((res) => setTimeout(res, 2500));
     }
     setProg({ done: lista.length, total: lista.length, label: "listo" });
     await cargarPeriodos();
