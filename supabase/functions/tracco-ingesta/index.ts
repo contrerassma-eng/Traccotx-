@@ -245,8 +245,16 @@ Deno.serve(async (req: Request) => {
       const iepdTotal = filas.reduce((a, x) => a + (x.iepd || 0), 0);
       const litrosTotal = +filas.reduce((a, x) => a + (x.litros || 0), 0).toFixed(2);
       const credito544 = Math.round(iepdTotal * tramo / 100);
-      const ingresoPorLitro = litrosTotal > 0 ? +(ingresos / litrosTotal).toFixed(2) : null;
-      await admin.from("tx_periodos").upsert({ rut: rutContrib, periodo, litros: litrosTotal, iepd_total: iepdTotal, credito_544: credito544, ingresos, ingreso_por_litro: ingresoPorLitro, updated_at: new Date().toISOString() }, { onConflict: "rut,periodo" });
+      // Protección: si hay diésel (iepd>0) pero no se extrajeron litros (descarga del
+      // DTE falló), NO pisar con 0 los litros ya rescatados antes.
+      let litrosFinal = litrosTotal;
+      if (litrosTotal === 0 && iepdTotal > 0) {
+        const { data: prev } = await admin.from("tx_periodos").select("litros").eq("rut", rutContrib).eq("periodo", periodo).maybeSingle();
+        const prevL = Number(prev?.litros || 0);
+        if (prevL > 0) litrosFinal = prevL;
+      }
+      const ingresoPorLitro = litrosFinal > 0 ? +(ingresos / litrosFinal).toFixed(2) : null;
+      await admin.from("tx_periodos").upsert({ rut: rutContrib, periodo, litros: litrosFinal, iepd_total: iepdTotal, credito_544: credito544, ingresos, ingreso_por_litro: ingresoPorLitro, updated_at: new Date().toISOString() }, { onConflict: "rut,periodo" });
       const porCat: Record<string, number> = {}; for (const f of filas) porCat[f.categoria] = (porCat[f.categoria] || 0) + 1;
       if (debug) { dbgDet.dieselFolios = compras.filter((c) => (c.iepd || 0) > 0).map((c) => c.folio + "@" + c.fechaEmision + "/t" + c.tipoDte); }
       resumen.push({ periodo, compras: filas.length, ventas: ventas.length, conDetalle: Object.keys(detalle).length, iepdTotal, litrosTotal, credito544, ingresos, ingresoPorLitro, porCategoria: porCat, ...(debug ? { dbg: dbgDet } : {}) });
