@@ -60,35 +60,76 @@ function parseDte(xml: string, map: Record<string, { litros: number; giro: strin
     map[folio] = { litros: +litros.toFixed(2), giro, items: items.slice(0, 8) };
   }
 }
-async function descargarDte(jar: Jar, url: string, map: Record<string, any>) {
+async function descargarDte(jar: Jar, url: string): Promise<Record<string, any>> {
+  const map: Record<string, any> = {};
   const r = await fetchJar(jar, url, { method: "GET", headers: { "User-Agent": UA } });
   const buf = new Uint8Array(await r.arrayBuffer());
-  if (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b) { try { const files = unzipSync(buf); for (const n of Object.keys(files)) if (/\.xml$/i.test(n)) parseDte(new TextDecoder().decode(files[n]), map); } catch { /* */ } return; }
+  if (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b) { try { const files = unzipSync(buf); for (const n of Object.keys(files)) if (/\.xml$/i.test(n)) parseDte(new TextDecoder().decode(files[n]), map); } catch { /* */ } return map; }
   const txt = new TextDecoder("iso-8859-1").decode(buf);
   if (!/Error al contribuyente|no ha seleccionado/i.test(txt)) parseDte(txt, map);
+  return map;
 }
-async function seleccionarEmpresa(rutCompleto: string, jar: Jar): Promise<boolean> {
+async function seleccionarEmpresa(rutCompleto: string, jar: Jar, dbg?: any): Promise<boolean> {
   const selUrl = "https://www1.sii.cl/cgi-bin/Portal001/mipeSelEmpresa.cgi?DESDE_DONDE_URL=OPCION%3D1%26TIPO%3D4";
   const r = await fetchJar(jar, selUrl, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/Portal001/menuFacturaElectronica.html" } });
   const html = new TextDecoder("iso-8859-1").decode(new Uint8Array(await r.arrayBuffer()));
-  const form = html.match(/<form[^>]*>[\s\S]*?<\/form>/i); if (!form) return false;
+  if (dbg) dbg.selStatus = r.status, dbg.selBytes = html.length;
+  const form = html.match(/<form[^>]*>[\s\S]*?<\/form>/i); if (!form) { if (dbg) dbg.selForm = false; return false; }
   const action = (form[0].match(/action=["']?([^"'\s>]+)/i) || [])[1] || "mipeSelEmpresa.cgi";
   const actionUrl = new URL(action.replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString();
   const params = new URLSearchParams();
   for (const h of form[0].matchAll(/<input[^>]*>/gi)) { const tag = h[0]; if (!/type=["']?hidden/i.test(tag) && !/type=["']?submit/i.test(tag) && /type=/i.test(tag)) continue; const n = (tag.match(/name=["']?([^"'\s>]+)/i) || [])[1]; const v = (tag.match(/value=["']?([^"'>]*)/i) || [])[1] || ""; if (n) params.set(n, v.replace(/&amp;/g, "&")); }
   const rutNum = rutCompleto.split("-")[0].replace(/\D/g, ""); const rutDot = rutNum.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
   const sel = form[0].match(/<select[^>]*name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)<\/select>/i);
-  if (sel) { let chosen = "", first = ""; for (const o of sel[2].matchAll(/<option[^>]*value=["']?([^"'>]*)["']?[^>]*>([^<]*)</gi)) { const val = (o[1] || "").trim(), lab = (o[2] || "").trim(); if (!first) first = val; if (val.includes(rutCompleto) || val.includes(rutNum) || lab.includes(rutNum) || lab.includes(rutDot)) { chosen = val; break; } } params.set(sel[1], chosen || first); }
-  const pr = await fetchJar(jar, actionUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA, "Origin": "https://www1.sii.cl", "Referer": selUrl }, body: params.toString() }); await pr.body?.cancel();
+  if (sel) { let chosen = "", first = ""; const opts: string[] = []; for (const o of sel[2].matchAll(/<option[^>]*value=["']?([^"'>]*)["']?[^>]*>([^<]*)</gi)) { const val = (o[1] || "").trim(), lab = (o[2] || "").trim(); opts.push(val + " :: " + lab); if (!first) first = val; if (val.includes(rutCompleto) || val.includes(rutNum) || lab.includes(rutNum) || lab.includes(rutDot)) { chosen = val; break; } } params.set(sel[1], chosen || first); if (dbg) dbg.opciones = opts, dbg.elegido = (chosen || first), dbg.match = !!chosen, dbg.selName = sel[1]; }
+  else if (dbg) dbg.selNoSelect = true;
+  const pr = await fetchJar(jar, actionUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA, "Origin": "https://www1.sii.cl", "Referer": selUrl }, body: params.toString() }); if (dbg) dbg.postStatus = pr.status; await pr.body?.cancel();
   return true;
 }
-async function detallePeriodo(periodo: string, tposDoc: number[], jar: Jar): Promise<Record<string, any>> {
+// Obtiene folio -> {litros, giro, items} replicando el flujo que SI rescataba litros:
+//   1) siembra la sesion www1 listando los recibidos del rango (mipeAdminDocsRcp) y
+//      extrae el link real de descarga;
+//   2) descarga masiva del periodo;
+//   3) descarga DIRIGIDA por (mes de EMISION del documento, tipo) con ventana hasta
+//      fin de periodo, para los folios de diesel que sigan sin litros (caza los DTE
+//      recibidos en un mes pero emitidos en otro y el tope ~20 docs del SII).
+async function obtenerDetalle(periodo: string, compras: any[], jar: Jar, dbg?: any): Promise<Record<string, any>> {
   const y = periodo.slice(0, 4), m = periodo.slice(4, 6); const last = String(new Date(+y, +m, 0).getDate()).padStart(2, "0");
   const desde = y + "-" + m + "-01", hasta = y + "-" + m + "-" + last;
   const map: Record<string, any> = {};
-  const dl = (tpo: string) => "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=" + tpo + "&ESTADO=&ORDEN=&DOWNLOAD=XML";
-  await descargarDte(jar, dl(""), map);
-  for (const t of tposDoc) { if (!t) continue; await sleep(700); await descargarDte(jar, dl(String(t)), map); }
+  const merge = (src: Record<string, any>) => { for (const k in src) { if (!map[k]) map[k] = src[k]; else if (!(map[k].litros > 0) && src[k].litros > 0) map[k] = src[k]; } };
+
+  // 1) Sembrar la sesion y extraer el link real de descarga del rango.
+  let bulkUrl = "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
+  try {
+    const seedUrl = "https://www1.sii.cl/cgi-bin/Portal001/mipeAdminDocsRcp.cgi?RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&NUM_PAG=1";
+    const sr = await fetchJar(jar, seedUrl, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeSelEmpresa.cgi?DESDE_DONDE_URL=OPCION%3D1%26TIPO%3D4" } });
+    const seedTxt = new TextDecoder("iso-8859-1").decode(new Uint8Array(await sr.arrayBuffer()));
+    const linkMatch = seedTxt.match(/mipeDownLoad\.cgi[^"'\s>)]*/i);
+    if (dbg) dbg.seedStatus = sr.status, dbg.seedBytes = seedTxt.length, dbg.seedLink = linkMatch ? linkMatch[0].slice(0, 200) : null, dbg.seedErr = /Error al contribuyente|no ha seleccionado/i.test(seedTxt);
+    if (linkMatch) { const u = new URL(linkMatch[0].replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString(); bulkUrl = /DOWNLOAD=/i.test(u) ? u.replace(/DOWNLOAD=[^&]*/i, "DOWNLOAD=XML") : u + "&DOWNLOAD=XML"; }
+  } catch (e) { if (dbg) dbg.seedErr2 = (e as Error).message; }
+
+  // 2) Descarga masiva del periodo.
+  const bulk = await descargarDte(jar, bulkUrl); merge(bulk);
+  if (dbg) dbg.bulkFolios = Object.keys(bulk), dbg.bulkConLitros = Object.values(bulk).filter((x: any) => x.litros > 0).length;
+
+  // 3) Descarga dirigida por (mes de emision, tipo) para diesel sin litros.
+  const dl = (fd: string, fh: string, tpo: string) => "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + fd + "&FEC_HASTA=" + fh + "&TPO_DOC=" + tpo + "&ESTADO=&ORDEN=&DOWNLOAD=XML";
+  const diesel = compras.filter((c) => (c.iepd || 0) > 0);
+  const hechos = new Set<string>();
+  for (const d of diesel) {
+    if (map[d.folio]?.litros > 0) continue;
+    const fp = String(d.fechaEmision || "").split("-"); // ISO yyyy-mm-dd
+    if (fp.length !== 3) continue;
+    const fd = fp[0] + "-" + fp[1].padStart(2, "0") + "-01";
+    const tpo = String(d.tipoDte || "").replace(/\D/g, "");
+    const key = fd + "|" + tpo;
+    if (hechos.has(key)) continue;
+    hechos.add(key);
+    await sleep(800);
+    merge(await descargarDte(jar, dl(fd, hasta, tpo)));
+  }
   return map;
 }
 
@@ -148,7 +189,9 @@ Deno.serve(async (req: Request) => {
     const jar = new Jar();
     const token = await loginClave(loginRut, claveSII, jar);
     if (!token) return json({ ok: false, error: "No se pudo autenticar con la clave (clave incorrecta o el SII está limitando; reintenta en un minuto)" }, 401);
-    await seleccionarEmpresa(rutContrib, jar).catch(() => false); // selecciona la empresa = rutContrib (clave para el modo representante)
+    const debug = url.searchParams.get("debug") === "1";
+    const dbgSel: any = {};
+    await seleccionarEmpresa(rutContrib, jar, debug ? dbgSel : undefined).catch(() => false); // selecciona empresa = rutContrib
 
     const resumen: any[] = [];
     for (const periodo of meses) {
@@ -157,10 +200,10 @@ Deno.serve(async (req: Request) => {
       // está vacío) no sobreescribimos un periodo ya cargado con ceros.
       if (!compras.length) { resumen.push({ periodo, compras: 0, ventas: 0, conDetalle: 0, omitido: "sin compras (no se sobreescribe)" }); continue; }
       let detalle: Record<string, any> = {};
-      // Intentamos el detalle siempre que haya compras: si el RUT tiene una sola
-      // empresa, el portal MIPYME no muestra selector (empresaOk=false) pero la
-      // descarga igual funciona; descargarDte ignora la pagina de error.
-      if (compras.length) { try { const tpos = [...new Set(compras.map((c) => c.tipoDte).filter(Boolean))] as number[]; detalle = await detallePeriodo(periodo, tpos, jar); } catch { /* sin detalle */ } }
+      const dbgDet: any = {};
+      // Detalle con siembra de sesion + descarga dirigida por mes de emision (rescata
+      // litros aunque el DTE se haya recibido en otro mes; igual que el script viejo).
+      try { detalle = await obtenerDetalle(periodo, compras, jar, debug ? dbgDet : undefined); } catch { /* sin detalle */ }
 
       const filas = compras.map((c) => {
         const det = detalle[c.folio] || {};
@@ -184,9 +227,10 @@ Deno.serve(async (req: Request) => {
       const ingresoPorLitro = litrosTotal > 0 ? +(ingresos / litrosTotal).toFixed(2) : null;
       await admin.from("tx_periodos").upsert({ rut: rutContrib, periodo, litros: litrosTotal, iepd_total: iepdTotal, credito_544: credito544, ingresos, ingreso_por_litro: ingresoPorLitro, updated_at: new Date().toISOString() }, { onConflict: "rut,periodo" });
       const porCat: Record<string, number> = {}; for (const f of filas) porCat[f.categoria] = (porCat[f.categoria] || 0) + 1;
-      resumen.push({ periodo, compras: filas.length, ventas: ventas.length, conDetalle: Object.keys(detalle).length, iepdTotal, litrosTotal, credito544, ingresos, ingresoPorLitro, porCategoria: porCat });
+      if (debug) { dbgDet.dieselFolios = compras.filter((c) => (c.iepd || 0) > 0).map((c) => c.folio + "@" + c.fechaEmision + "/t" + c.tipoDte); }
+      resumen.push({ periodo, compras: filas.length, ventas: ventas.length, conDetalle: Object.keys(detalle).length, iepdTotal, litrosTotal, credito544, ingresos, ingresoPorLitro, porCategoria: porCat, ...(debug ? { dbg: dbgDet } : {}) });
     }
-    return json({ ok: true, rut: rutContrib, via: "clave", meses: meses.length, resumen });
+    return json({ ok: true, rut: rutContrib, via: "clave", meses: meses.length, ...(url.searchParams.get("debug") === "1" ? { dbgSel } : {}), resumen });
   } catch (e) {
     return json({ ok: false, error: (e as Error).message }, 500);
   }
