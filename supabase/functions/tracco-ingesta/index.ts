@@ -115,10 +115,10 @@ async function seleccionarEmpresa(rutCompleto: string, jar: Jar, dbg?: any): Pro
 //   3) descarga DIRIGIDA por (mes de EMISION del documento, tipo) con ventana hasta
 //      fin de periodo, para los folios de diesel que sigan sin litros (caza los DTE
 //      recibidos en un mes pero emitidos en otro y el tope ~20 docs del SII).
-async function obtenerDetalle(periodo: string, compras: any[], jar: Jar, dbg?: any): Promise<Record<string, any>> {
+async function obtenerDetalle(periodo: string, compras: any[], jar: Jar, seed: Record<string, any> = {}, dbg?: any): Promise<Record<string, any>> {
   const y = periodo.slice(0, 4), m = periodo.slice(4, 6); const last = String(new Date(+y, +m, 0).getDate()).padStart(2, "0");
   const desde = y + "-" + m + "-01", hasta = y + "-" + m + "-" + last;
-  const map: Record<string, any> = {};
+  const map: Record<string, any> = { ...seed }; // diferencial: parte de lo ya rescatado
   const merge = (src: Record<string, any>) => { for (const k in src) { if (!map[k]) map[k] = src[k]; else if (!(map[k].litros > 0) && src[k].litros > 0) map[k] = src[k]; } };
 
   // 1) Sembrar la sesion y extraer el link real de descarga del rango.
@@ -220,11 +220,18 @@ Deno.serve(async (req: Request) => {
       // Guarda: si no hay compras (p.ej. el SII limitó la sesión o el periodo
       // está vacío) no sobreescribimos un periodo ya cargado con ceros.
       if (!compras.length) { resumen.push({ periodo, compras: 0, ventas: 0, conDetalle: 0, omitido: "sin compras (no se sobreescribe)" }); continue; }
-      let detalle: Record<string, any> = {};
       const dbgDet: any = {};
-      // Detalle con siembra de sesion + descarga dirigida por mes de emision (rescata
-      // litros aunque el DTE se haya recibido en otro mes; igual que el script viejo).
-      try { detalle = await obtenerDetalle(periodo, compras, jar, debug ? dbgDet : undefined); } catch { /* sin detalle */ }
+      // DIFERENCIAL: partimos de lo ya guardado (tx_facturas) y solo vamos al SII por lo
+      // que falta. Si no hay nada nuevo, no se descarga nada del SII.
+      const { data: prevF } = await admin.from("tx_facturas").select("folio, litros, subcategoria, raw").eq("rut", rutContrib).eq("tipo", "compra").eq("periodo", periodo);
+      const seed: Record<string, any> = {};
+      for (const p of (prevF || [])) seed[(p as any).folio] = { litros: Number((p as any).litros) || 0, giro: (p as any).subcategoria || "", items: ((p as any).raw?.items) || [] };
+      const dieselPend = compras.filter((c) => (c.iepd || 0) > 0 && !(seed[c.folio]?.litros > 0));
+      const faltaDetalle = compras.some((c) => !(c.folio in seed));
+      let detalle: Record<string, any> = seed;
+      if (dieselPend.length || faltaDetalle) {
+        try { detalle = await obtenerDetalle(periodo, compras, jar, seed, debug ? dbgDet : undefined); } catch { /* sin detalle */ }
+      } else if (debug) { dbgDet.diferencial = "sin cambios, no se consultó el SII"; }
 
       const filas = compras.map((c) => {
         const det = detalle[c.folio] || {};

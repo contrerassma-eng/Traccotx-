@@ -13,9 +13,10 @@ type Periodo = {
 };
 type Empresa = { rut: string; razon_social: string };
 type Factura = {
-  folio: string; tipo_dte: number | null; razon_social: string | null;
-  fecha_emision: string | null; categoria: string | null; neto: number | null;
-  iepd: number | null; litros: number | null; total: number | null;
+  id: string; folio: string; tipo_dte: number | null; razon_social: string | null;
+  rut_contraparte: string | null; fecha_emision: string | null; categoria: string | null;
+  neto: number | null; iva?: number | null; exento?: number | null;
+  iepd: number | null; litros: number | null; total: number | null; raw?: any;
 };
 type Camion = {
   id?: string; rut?: string; patente: string; caja_rol: string | null;
@@ -104,6 +105,7 @@ export default function App() {
   const [mes, setMes] = useState(""); // "" = todo el año, o "01".."12"
   const [periodos, setPeriodos] = useState<Periodo[]>([]);
   const [gastos, setGastos] = useState<{ label: string; value: number }[]>([]);
+  const [catNombres, setCatNombres] = useState<string[]>([]);
   const [estado, setEstado] = useState("Cargando…");
 
   // sincronización por rango con barra de progreso
@@ -120,32 +122,49 @@ export default function App() {
     const h = new Date(); let y = h.getFullYear(), m = h.getMonth(); if (m === 0) { m = 12; y -= 1; }
     const per = "" + y + String(m).padStart(2, "0");
     setDesdeSync(per); setHastaSync(per);
+    (async () => { const { data } = await supabase.from("tx_categorias").select("nombre").is("rut", null).order("nombre"); setCatNombres((data || []).map((c: any) => c.nombre)); })();
   }, []);
 
+  // RUTs activos: una empresa, o todas (vista consolidada).
+  const rutsActivos = useMemo(() => rut === "__all__" ? empresas.map((e) => e.rut) : (rut ? [rut] : []), [rut, empresas]);
+
   async function cargarPeriodos() {
-    if (!rut) return;
+    if (!rutsActivos.length) { setPeriodos([]); return; }
     const { data, error } = await supabase
       .from("tx_periodos")
       .select("periodo, litros, iepd_total, credito_544, ingresos, ingreso_por_litro")
-      .eq("rut", rut).order("periodo", { ascending: true });
-    if (error) setEstado("No se pudo cargar: " + error.message);
-    else { setPeriodos(data || []); setEstado((data || []).length ? "" : "Aún no hay datos. Usa “Actualizar mes”."); }
+      .in("rut", rutsActivos).order("periodo", { ascending: true });
+    if (error) { setEstado("No se pudo cargar: " + error.message); return; }
+    let rows: Periodo[] = (data || []) as Periodo[];
+    if (rutsActivos.length > 1) {
+      // Consolidado: sumamos por período entre todas las empresas.
+      const acc: Record<string, Periodo> = {};
+      for (const r of rows) {
+        const k = r.periodo; if (!acc[k]) acc[k] = { periodo: k, litros: 0, iepd_total: 0, credito_544: 0, ingresos: 0, ingreso_por_litro: null };
+        acc[k].litros = (Number(acc[k].litros) || 0) + (Number(r.litros) || 0);
+        acc[k].iepd_total = (acc[k].iepd_total || 0) + (r.iepd_total || 0);
+        acc[k].credito_544 = (acc[k].credito_544 || 0) + (r.credito_544 || 0);
+        acc[k].ingresos = (acc[k].ingresos || 0) + (r.ingresos || 0);
+      }
+      rows = Object.values(acc).sort((a, b) => a.periodo.localeCompare(b.periodo)).map((p) => ({ ...p, ingreso_por_litro: Number(p.litros) > 0 ? Math.round((p.ingresos || 0) / Number(p.litros)) : null }));
+    }
+    setPeriodos(rows); setEstado(rows.length ? "" : "Aún no hay datos. Usa “Sincronizar”.");
   }
 
-  useEffect(() => { if (rut) { localStorage.setItem("tx_rut", rut); setEstado("Cargando…"); cargarPeriodos(); } }, [rut]);
+  useEffect(() => { if (rut) { localStorage.setItem("tx_rut", rut); setEstado("Cargando…"); cargarPeriodos(); } }, [rut, empresas]);
 
-  // Gasto por tipo (categoría) para el alcance año / año+mes.
+  // Gasto por tipo (categoría) para el alcance año / año+mes (una empresa o todas).
   useEffect(() => {
-    if (!rut) { setGastos([]); return; }
+    if (!rutsActivos.length) { setGastos([]); return; }
     (async () => {
-      let q = supabase.from("tx_facturas").select("categoria, total").eq("rut", rut).eq("tipo", "compra");
+      let q = supabase.from("tx_facturas").select("categoria, total").in("rut", rutsActivos).eq("tipo", "compra");
       q = mes ? q.eq("periodo", String(anio) + mes) : q.gte("periodo", String(anio) + "01").lte("periodo", String(anio) + "12");
       const { data } = await q;
       const acc: Record<string, number> = {};
       (data || []).forEach((f: any) => { const k = f.categoria || "Otros"; acc[k] = (acc[k] || 0) + (Number(f.total) || 0); });
       setGastos(Object.entries(acc).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value));
     })();
-  }, [rut, anio, mes]);
+  }, [rut, empresas, anio, mes]);
 
   // Sincroniza mes por mes (barra de progreso real) llamando a la ingesta por período,
   // con una pausa entre meses para ser suave con el SII.
@@ -233,6 +252,7 @@ export default function App() {
             {empresas.length > 0 && (
               <select value={rut} onChange={(e) => setRut(e.target.value)} style={selStyle}>
                 {empresas.map((em) => <option key={em.rut} value={em.rut}>{em.razon_social} ({em.rut})</option>)}
+                {empresas.length > 1 && <option value="__all__">★ Todas las empresas (consolidado)</option>}
               </select>
             )}
             <select value={anio} onChange={(e) => setAnio(Number(e.target.value))} style={selStyle}>
@@ -247,6 +267,9 @@ export default function App() {
 
         {seccion === "dashboard" && (
           <>
+            {rut === "__all__" ? (
+              <div style={{ marginBottom: 18 }}><Card title="Vista consolidada"><p style={{ color: C.sub, margin: 0, fontSize: 13 }}>Estás viendo el total de todas tus empresas. Para sincronizar con el SII, elige una empresa específica arriba.</p></Card></div>
+            ) : (
             <div style={{ marginBottom: 18 }}>
               <Card title="Sincronizar con el SII">
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -268,6 +291,7 @@ export default function App() {
                 {msg && <div style={{ fontSize: 13, color: C.accent, marginTop: 8 }}>{msg}</div>}
               </Card>
             </div>
+            )}
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 18 }}>
               <Kpi label="Crédito 544 (recuperable)" value={clp(tot.credito)} accent sub={`IEPD × tramo · ${anio}`} />
@@ -315,9 +339,9 @@ export default function App() {
           </>
         )}
 
-        {seccion === "facturas" && <Facturas rut={rut} anio={anio} />}
-        {seccion === "camiones" && <Camiones rut={rut} />}
-        {seccion === "config" && <Configuracion rut={rut} onEmpresas={(e, nuevoRut) => { setEmpresas(e); localStorage.setItem("tx_empresas", JSON.stringify(e)); if (nuevoRut) setRut(nuevoRut); }} />}
+        {seccion === "facturas" && (rut === "__all__" ? <Card title="Facturas"><p style={{ color: C.sub, margin: 0 }}>Elige una empresa específica arriba para ver y editar sus facturas.</p></Card> : <Facturas rut={rut} anio={anio} catOpts={catNombres} />)}
+        {seccion === "camiones" && (rut === "__all__" ? <Card title="Camiones"><p style={{ color: C.sub, margin: 0 }}>Elige una empresa específica arriba.</p></Card> : <Camiones rut={rut} />)}
+        {seccion === "config" && (rut === "__all__" ? <Card title="Configuración"><p style={{ color: C.sub, margin: 0 }}>Elige una empresa específica arriba.</p></Card> : <Configuracion rut={rut} onEmpresas={(e, nuevoRut) => { setEmpresas(e); localStorage.setItem("tx_empresas", JSON.stringify(e)); if (nuevoRut) setRut(nuevoRut); }} />)}
         {seccion === "f29" && <F29 delAnio={delAnio} anio={anio} empresa={empresaActual} />}
         {seccion === "dj" && <Placeholder titulo="Declaraciones Juradas 1866 / 1867" detalle="Genera los borradores de la DJ 1866 (crédito IEPD) y DJ 1867 a partir de las facturas clasificadas. En construcción — los datos base (IEPD, litros, crédito 544) ya están disponibles por período." />}
       </main>
@@ -367,33 +391,60 @@ function Placeholder({ titulo, detalle }: { titulo: string; detalle: string }) {
 }
 
 // ---------- Facturas ----------
-function Facturas({ rut, anio }: { rut: string; anio: number }) {
+function Facturas({ rut, anio, catOpts }: { rut: string; anio: number; catOpts: string[] }) {
   const [periodo, setPeriodo] = useState("");
   const [rows, setRows] = useState<Factura[]>([]);
   const [cat, setCat] = useState("");
   const [estado, setEstado] = useState("Selecciona un período.");
 
-  useEffect(() => {
-    // por defecto el último período del año con datos
-    setPeriodo(String(anio) + "12");
-  }, [anio]);
+  useEffect(() => { setPeriodo(String(anio) + "12"); }, [anio]);
 
-  useEffect(() => {
+  async function cargar() {
     if (!rut || !/^\d{6}$/.test(periodo)) return;
-    (async () => {
-      setEstado("Cargando…");
-      const { data, error } = await supabase
-        .from("tx_facturas")
-        .select("folio, tipo_dte, razon_social, fecha_emision, categoria, neto, iepd, litros, total")
-        .eq("rut", rut).eq("tipo", "compra").eq("periodo", periodo)
-        .order("iepd", { ascending: false });
-      if (error) setEstado("Error: " + error.message);
-      else { setRows(data || []); setEstado((data || []).length ? "" : "Sin facturas en este período."); }
-    })();
-  }, [rut, periodo]);
+    setEstado("Cargando…");
+    const { data, error } = await supabase
+      .from("tx_facturas")
+      .select("id, folio, tipo_dte, razon_social, rut_contraparte, fecha_emision, categoria, neto, iva, exento, iepd, litros, total, raw")
+      .eq("rut", rut).eq("tipo", "compra").eq("periodo", periodo)
+      .order("iepd", { ascending: false });
+    if (error) setEstado("Error: " + error.message);
+    else { setRows((data || []) as Factura[]); setEstado((data || []).length ? "" : "Sin facturas en este período."); }
+  }
+  useEffect(() => { cargar(); }, [rut, periodo]);
 
-  const cats = useMemo(() => [...new Set(rows.map((r) => r.categoria || "Otros"))].sort(), [rows]);
+  // Recategorizar manualmente (queda marcado como manual).
+  async function recategorizar(f: Factura, nueva: string) {
+    setRows((rs) => rs.map((x) => x.id === f.id ? { ...x, categoria: nueva } : x));
+    await supabase.from("tx_facturas").update({ categoria: nueva, clasif_origen: "manual" }).eq("id", f.id);
+  }
+
+  // Descarga un PDF imprimible de la factura (desde los datos guardados).
+  function descargarPdf(f: Factura) {
+    const items = (f.raw?.items || []) as string[];
+    const fila = (k: string, v: string) => `<tr><td style="color:#555;padding:3px 10px 3px 0">${k}</td><td style="font-weight:600">${v}</td></tr>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>DTE ${f.folio}</title></head>
+      <body style="font-family:Arial,sans-serif;max-width:640px;margin:30px auto;color:#111">
+      <h2 style="margin:0 0 2px">Documento ${f.tipo_dte || ""} · Folio ${f.folio}</h2>
+      <div style="color:#666;margin-bottom:16px">Tracco Tx — comprobante interno</div>
+      <table style="border-collapse:collapse;font-size:14px">
+        ${fila("Proveedor", (f.razon_social || "—") + (f.rut_contraparte ? " (" + f.rut_contraparte + ")" : ""))}
+        ${fila("Fecha", f.fecha_emision || "—")}
+        ${fila("Categoría", f.categoria || "Otros")}
+        ${fila("Neto", clp(f.neto))}
+        ${fila("IVA", clp(f.iva ?? 0))}
+        ${fila("Exento", clp(f.exento ?? 0))}
+        ${fila("IEPD (cód. 28)", f.iepd ? clp(f.iepd) : "—")}
+        ${fila("Litros diésel", f.litros ? numL(f.litros) : "—")}
+        ${fila("Total", clp(f.total))}
+      </table>
+      ${items.length ? `<h3 style="margin:18px 0 6px;font-size:13px">Detalle</h3><ul style="font-size:13px;color:#333">${items.map((it) => `<li>${it}</li>`).join("")}</ul>` : ""}
+      <script>window.onload=()=>window.print()</script></body></html>`;
+    const w = window.open("", "_blank");
+    if (w) { w.document.write(html); w.document.close(); }
+  }
+
   const filtradas = cat ? rows.filter((r) => (r.categoria || "Otros") === cat) : rows;
+  const cats = useMemo(() => [...new Set(rows.map((r) => r.categoria || "Otros"))].sort(), [rows]);
 
   return (
     <Card title="Facturas de compra clasificadas">
@@ -404,17 +455,25 @@ function Facturas({ rut, anio }: { rut: string; anio: number }) {
       </div>
       {estado && <p style={{ color: C.sub }}>{estado}</p>}
       {filtradas.length > 0 && (
-        <Tabla cols={["Fecha", "Folio", "Proveedor", "Categoría", "Neto", "IEPD", "Litros", "Total"]}>
-          {filtradas.map((r, i) => (
-            <tr key={i}>
+        <Tabla cols={["Fecha", "Folio", "Proveedor", "Categoría", "Neto", "IEPD", "Litros", "Total", "PDF"]}>
+          {filtradas.map((r) => (
+            <tr key={r.id}>
               <td style={tdL}>{r.fecha_emision || "—"}</td>
               <td style={tdL}>{r.folio}</td>
-              <td style={{ ...tdL, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.razon_social || "—"}</td>
-              <td style={tdL}><span style={{ fontSize: 11, color: C.accent }}>{r.categoria || "Otros"}</span></td>
+              <td style={{ ...tdL, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.razon_social || "—"}</td>
+              <td style={tdL}>
+                <select value={r.categoria || "Otros"} onChange={(e) => recategorizar(r, e.target.value)}
+                  style={{ background: "#0e1530", color: C.accent, border: "1px solid #2a3658", borderRadius: 6, fontSize: 11, padding: "3px 4px", maxWidth: 150 }}>
+                  {[...new Set([r.categoria || "Otros", ...catOpts])].map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </td>
               <td style={td}>{clp(r.neto)}</td>
               <td style={td}>{r.iepd ? clp(r.iepd) : "—"}</td>
               <td style={td}>{r.litros ? numL(r.litros) : "—"}</td>
               <td style={td}>{clp(r.total)}</td>
+              <td style={{ ...td, textAlign: "center" }}>
+                <button onClick={() => descargarPdf(r)} title="Descargar PDF" style={{ background: "transparent", border: 0, cursor: "pointer", fontSize: 15 }}>📄</button>
+              </td>
             </tr>
           ))}
         </Tabla>
