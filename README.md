@@ -2,52 +2,73 @@
 
 Automatización tributaria contra el **SII (Servicio de Impuestos Internos)** de Chile.
 
-El proyecto se construye por pruebas incrementales. Cada pieza se valida antes de
-montar la siguiente encima:
+App **100% en Supabase Edge (Deno)** que recupera el **Impuesto Específico al
+Petróleo Diésel (IEPD)** mes a mes para declararlo en el F29 — sin instalar nada,
+desde el navegador. Lee el certificado digital desde Storage, autentica contra el
+SII, baja las compras del RCV, identifica las facturas de diésel y cruza los
+litros por folio.
 
-1. **Prueba 1 — Autenticación con certificado** ✅ (carpeta [`auth/`](auth/))
-   La prueba de fuego: leer el certificado `.pfx`, pedir una *semilla* al SII,
-   firmarla y obtener un **TOKEN** de sesión. Si el SII entrega el token, el
-   certificado autentica y el resto de la arquitectura web es viable.
-2. **Bóveda** — _pendiente_ (almacenamiento seguro del certificado / credenciales).
-3. **F29** — _pendiente_ (declaración mensual).
-4. **Formulario 1866** — _pendiente_.
+> Documento técnico completo y estado al día: **[`docs/HANDOFF.md`](docs/HANDOFF.md)**.
+
+## Estado (v8)
+
+| Etapa | Estado |
+|---|---|
+| Autenticación SII con certificado (semilla → firma → token) | ✅ Confirmado en producción |
+| Compras del RCV + extracción de diésel (IEPD, código 28) | ✅ Confirmado con datos reales |
+| Login con clave + descarga ZIP + cruce de litros por folio | ⏳ Desplegado, en prueba |
+| Bóveda (Postgres), módulos F29 / DJ1866, ventas, dashboard | ⬜ Pendiente |
+
+**Hallazgo de negocio:** el contribuyente no estaba recuperando ~$266.000/mes de
+crédito IEPD (código 544). Confirmado con enero 2025.
 
 ## Estructura
 
 ```
-auth/              Prueba 1: autenticación SII (semilla → firma → token)
-  pfx.js           Lee el .pfx (PKCS#12) → llave privada + certificado en PEM
-  sii-auth.js      Flujo SII: pedir semilla, firmar (XML-DSig SHA1), pedir token
-  test-auth.js     Script ejecutable de la prueba de fuego
-  package.json     Dependencias (node-forge, xml-crypto, @xmldom/xmldom)
-  LEEME.txt        Instrucciones paso a paso para correr la prueba en Windows
+supabase/functions/tracco-auth-test/index.ts   Edge Function viva (v8): auth + compras + litros
+docs/HANDOFF.md                                 Handoff técnico completo (arquitectura, riesgos, roadmap)
+auth/                                           Prueba 1 original: scripts Node standalone de autenticación
+  pfx.js  sii-auth.js  test-auth.js  package.json  LEEME.txt
+.env.example                                    Nombres de secretos/variables (sin valores)
 ```
 
-## Cómo correr la Prueba 1
+> `auth/` son los scripts Node con que se validó la autenticación al inicio. La
+> Edge Function de `supabase/` es la evolución que corre todo en la nube (Deno).
 
-Ver instrucciones detalladas en [`auth/LEEME.txt`](auth/LEEME.txt). En resumen,
-desde la carpeta `auth/` con Node instalado:
+## Desplegar la Edge Function
 
 ```bash
-npm install
-node test-auth.js "ruta/al/certificado.pfx"
+supabase functions deploy tracco-auth-test --no-verify-jwt --project-ref oiratzlacjskhaxizajb
+supabase functions logs   tracco-auth-test --project-ref oiratzlacjskhaxizajb
 ```
 
-La clave del certificado se pide en pantalla y **no se guarda en ningún archivo**.
+Se prueba abriendo la URL en el navegador (devuelve JSON con `logs[]` dentro):
+`https://<project-ref>.supabase.co/functions/v1/tracco-auth-test?periodo=AAAAMM`
+
+## Configuración (secretos en Supabase, NO en el repo)
+
+Ver [`.env.example`](.env.example). Los secretos se configuran en Supabase
+(Edge Functions → Secrets):
+
+- `CERT_PASS` — clave del certificado `.pfx`
+- `CLAVE_SII` — clave tributaria del SII
+- `RUT_CONTRIBUYENTE` — RUT del contribuyente (`12345678-9`)
+- El certificado `.p12` vive en el bucket privado `certs` (lo lee el service role).
 
 ## Seguridad
 
-- **Nunca** se versiona el certificado ni la clave: el `.gitignore` bloquea
+- **Nunca** se versionan certificados ni claves: el `.gitignore` bloquea
   `*.pfx`, `*.p12`, `*.pem`, `*.key`, `.env` y similares.
-- La clave del certificado se solicita interactivamente en cada ejecución.
-- No hay datos personales en el código (RUT, nombre ni usuario). El RUT para la
-  prueba opcional del RCV se entrega por variable de entorno:
-  `RUT=12345678-9 node test-auth.js`. Si no se define, esa prueba se omite.
-- El TOKEN del SII caduca en minutos; aun así no debe pegarse en sitios públicos.
+- **No hay datos personales en el repo**: RUT, nombre y correo están como
+  placeholders; los valores reales viven solo en los secretos de Supabase.
+- ⚠️ La función está como `verify_jwt:false` (pública). Cualquiera con la URL
+  recibe los datos tributarios del contribuyente; antes de producción conviene
+  protegerla (JWT, token propio, o restricción por origen). Ver `docs/HANDOFF.md` §2.
+- El TOKEN del SII caduca en minutos; no debe pegarse en sitios públicos.
 
 ## Notas técnicas
 
 - Endpoints de producción del SII (`palena.sii.cl`). Para certificación/pruebas
   existe el ambiente `maullin.sii.cl`.
-- La firma de la semilla usa XML-DSig *enveloped* con RSA-SHA1, como exige el SII.
+- La firma de la semilla usa XML-DSig *enveloped* con RSA-SHA1, replicada byte a
+  byte con `node-forge` puro (corre en Deno, sin `Buffer`).
