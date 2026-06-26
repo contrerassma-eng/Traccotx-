@@ -1,7 +1,8 @@
-// Tracco Tx - Edge Function v9 (Deno / Supabase)
-// v9: diagnostico de litros. mipeDownLoad devolvia "Error al contribuyente" (HTML
-// 957 bytes) pese a login OK. Se agrega mipeLaunchPage, se loguea el paso seed y
-// el error completo, y se extrae del HTML el link de descarga REAL del portal.
+// Tracco Tx - Edge Function v10 (Deno / Supabase)
+// v10: el portal MIPYME exige SELECCIONAR EMPRESA (Enviar) tras el login porque el
+// contribuyente tiene varios RUT; sin eso daba "Error al contribuyente". Se agrega
+// seleccionarEmpresa() (lee el form, elige la opcion del RUT, postea) antes de
+// listar/descargar. El RUT es variable de entrada: ?rut= en la URL o secreto.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -15,9 +16,8 @@ const RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
 const SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
 const URL_SEMILLA = "https://palena.sii.cl/DTEWS/CrSeed.jws";
 const URL_TOKEN = "https://palena.sii.cl/DTEWS/GetTokenFromSeed.jws";
-// RUT del contribuyente (formato 12345678-9). No se hardcodea: se toma del
-// secreto RUT_CONTRIBUYENTE en Supabase (Edge Functions > Secrets).
-const RUT_PRUEBA = Deno.env.get("RUT_CONTRIBUYENTE") || "";
+// El RUT del contribuyente NO se hardcodea. Se toma del secreto
+// RUT_CONTRIBUYENTE en Supabase, o del parametro ?rut= de la URL (lo que venga).
 
 const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "content-type, authorization, apikey" };
 
@@ -209,25 +209,68 @@ async function loginClave(rutCompleto: string, clave: string, jar: Jar, logs: st
   logs.push("      Login SII -> HTTP " + r.status + " | cookies: [" + [...jar.cookies.keys()].join(",") + "]");
   if (txt && /incorrect|inv[aá]lid|no coincide|bloquead/i.test(txt)) logs.push("      AVISO: el SII pudo rechazar el login (revisa la clave en CLAVE_SII)");
 }
+// Tras el login, el portal MIPYME exige ELEGIR la empresa (el contribuyente puede
+// tener varios RUT) y apretar "Enviar". Ese POST "genera el acceso" (fija el RUT
+// de trabajo). Sin esto, mipeAdminDocsRcp devuelve "Error al contribuyente".
+async function seleccionarEmpresa(rutCompleto: string, jar: Jar, logs: string[]): Promise<void> {
+  const decFull = (b: Uint8Array) => new TextDecoder("iso-8859-1").decode(b);
+  const r = await fetchJar(jar, "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi", { method: "GET", headers: { "User-Agent": UA } });
+  const html = decFull(new Uint8Array(await r.arrayBuffer()));
+  logs.push("      Seleccion empresa (mipeLaunchPage) -> HTTP " + r.status + " | " + html.length + " bytes");
+
+  const form = html.match(/<form[^>]*>[\s\S]*?<\/form>/i);
+  if (!form) { logs.push("      (no hay form de seleccion; quiza ya hay empresa fijada)"); return; }
+  const formHtml = form[0];
+  const action = (formHtml.match(/action=["']?([^"'\s>]+)/i) || [])[1] || "mipeLaunchPage.cgi";
+  const actionUrl = new URL(action.replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString();
+
+  const params = new URLSearchParams();
+  for (const h of formHtml.matchAll(/<input[^>]*>/gi)) {
+    const tag = h[0];
+    if (!/type=["']?hidden/i.test(tag) && !/type=["']?submit/i.test(tag) && /type=/i.test(tag)) continue;
+    const n = (tag.match(/name=["']?([^"'\s>]+)/i) || [])[1];
+    const v = (tag.match(/value=["']?([^"'>]*)/i) || [])[1] || "";
+    if (n) params.set(n, v.replace(/&amp;/g, "&"));
+  }
+
+  const rutNum = rutCompleto.split("-")[0].replace(/\D/g, "");
+  const rutDot = rutNum.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  const sel = formHtml.match(/<select[^>]*name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)<\/select>/i);
+  if (sel) {
+    const selName = sel[1];
+    let chosen = "", first = "";
+    for (const o of sel[2].matchAll(/<option[^>]*value=["']?([^"'>]*)["']?[^>]*>([^<]*)</gi)) {
+      const val = (o[1] || "").trim(), label = (o[2] || "").trim();
+      if (!first) first = val;
+      logs.push("      opcion empresa: value=" + val + " | " + label.slice(0, 40));
+      if (val.includes(rutCompleto) || val.includes(rutNum) || label.includes(rutNum) || label.includes(rutDot)) { chosen = val; break; }
+    }
+    params.set(selName, chosen || first);
+    logs.push("      Empresa elegida: " + selName + "=" + (chosen || first) + (chosen ? " (match RUT)" : " (fallback 1ra)"));
+  } else {
+    logs.push("      (no encontre <select> de empresa en el form)");
+  }
+
+  const pr = await fetchJar(jar, actionUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA, "Origin": "https://www1.sii.cl", "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi" }, body: params.toString() });
+  logs.push("      Enviar empresa -> HTTP " + pr.status + " | action=" + actionUrl + " | cookies:[" + [...jar.cookies.keys()].join(",") + "]");
+  await pr.body?.cancel();
+}
 async function bajarRespaldoZip(rutCompleto: string, periodo: string, jar: Jar, logs: string[]): Promise<Uint8Array | null> {
   const y = periodo.slice(0, 4), m = periodo.slice(4, 6);
   const last = new Date(+y, +m, 0).getDate();
   const desde = y + "-" + m + "-01", hasta = y + "-" + m + "-" + String(last).padStart(2, "0");
   const dec = (b: Uint8Array) => new TextDecoder("iso-8859-1").decode(b).replace(/\s+/g, " ");
 
-  // Paso 0: visitar la página de lanzamiento del portal MIPYME (a veces requerido
-  // para que www1 acepte la sesión venida de zeusr antes de consultar/descargar).
+  // Paso 0: seleccionar la EMPRESA (apretar "Enviar") para fijar el RUT de trabajo.
   try {
-    const lp = await fetchJar(jar, "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi?OPCION=1&TIPO=4", { method: "GET", headers: { "User-Agent": UA } });
-    logs.push("      mipeLaunchPage -> HTTP " + lp.status);
-    await lp.body?.cancel();
-  } catch (e) { logs.push("      (mipeLaunchPage fallo: " + (e as Error).message + ")"); }
+    await seleccionarEmpresa(rutCompleto, jar, logs);
+  } catch (e) { logs.push("      (seleccion de empresa fallo: " + (e as Error).message + ")"); }
 
   // Paso 1: sembrar la sesión listando los documentos recibidos del rango.
   // Logueamos la respuesta para saber si la sesión www1 quedo realmente activa
   // y, sobre todo, para extraer el link de descarga REAL que arma el portal.
   const seedUrl = "https://www1.sii.cl/cgi-bin/Portal001/mipeAdminDocsRcp.cgi?RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&NUM_PAG=1";
-  const sr = await fetchJar(jar, seedUrl, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi?OPCION=1&TIPO=4" } });
+  const sr = await fetchJar(jar, seedUrl, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi" } });
   const seedBuf = new Uint8Array(await sr.arrayBuffer());
   const seedTxt = dec(seedBuf);
   logs.push("      mipeAdminDocsRcp (seed) -> HTTP " + sr.status + " | " + (sr.headers.get("content-type") || "") + " | " + seedBuf.length + " bytes");
@@ -272,9 +315,11 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const logs: string[] = [];
   try {
+    const url = new URL(req.url);
+    const rutContrib = (url.searchParams.get("rut") || Deno.env.get("RUT_CONTRIBUYENTE") || "").trim();
     const clave = Deno.env.get("CERT_PASS");
     if (!clave) return json({ ok: false, logs: ["Falta el secreto CERT_PASS. Agregalo en Supabase > Project Settings > Edge Functions > Secrets (o Functions > Secrets)."] });
-    if (!RUT_PRUEBA) return json({ ok: false, logs: ["Falta el secreto RUT_CONTRIBUYENTE (formato 12345678-9). Agregalo en Supabase > Edge Functions > Secrets."] });
+    if (!rutContrib) return json({ ok: false, logs: ["Falta el RUT del contribuyente: agregalo como secreto RUT_CONTRIBUYENTE (formato 12345678-9) o pasalo en la URL (&rut=12345678-9)."] });
 
     logs.push("[1/5] Bajando certificado desde Storage (bucket certs)...");
     const binary = await leerCertDeStorage(logs);
@@ -292,7 +337,6 @@ Deno.serve(async (req: Request) => {
     const token = await pedirToken(firmado, logs);
     logs.push("      TOKEN OBTENIDO: " + token);
 
-    const url = new URL(req.url);
     let periodo = url.searchParams.get("periodo") || "";
     if (!/^\d{6}$/.test(periodo)) {
       const hoy = new Date();
@@ -301,7 +345,7 @@ Deno.serve(async (req: Request) => {
       periodo = "" + y + String(m).padStart(2, "0");
     }
     logs.push("[5/5] Bajando compras del periodo " + periodo + "...");
-    const { totalDocumentos, diesel, totalIEPD } = await extraerCompras(token, RUT_PRUEBA, periodo, logs);
+    const { totalDocumentos, diesel, totalIEPD } = await extraerCompras(token, rutContrib, periodo, logs);
     const credito544 = Math.round(totalIEPD * 0.8);
 
     logs.push("      Obteniendo litros por folio...");
@@ -310,8 +354,8 @@ Deno.serve(async (req: Request) => {
     if (claveSII && diesel.length) {
       const jar = new Jar();
       logs.push("      Iniciando sesion en el SII con clave...");
-      await loginClave(RUT_PRUEBA, claveSII, jar, logs);
-      const zip = await bajarRespaldoZip(RUT_PRUEBA, periodo, jar, logs);
+      await loginClave(rutContrib, claveSII, jar, logs);
+      const zip = await bajarRespaldoZip(rutContrib, periodo, jar, logs);
       if (zip) litrosMap = litrosDesdeZip(zip, logs);
     } else {
       litrosMap = await leerXmlsLitros(logs);
