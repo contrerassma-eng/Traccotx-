@@ -49,6 +49,26 @@ function Bars({ data, color, fmt }: { data: { label: string; value: number }[]; 
   );
 }
 
+// barras horizontales por categoría (etiquetas largas)
+const PALETA = ["#2dd4bf", "#38bdf8", "#a78bfa", "#fb7185", "#fbbf24", "#34d399", "#f472b6", "#60a5fa", "#f59e0b", "#4ade80", "#c084fc", "#22d3ee", "#94a3b8"];
+function HBars({ data, fmt }: { data: { label: string; value: number }[]; fmt: (v: number) => string }) {
+  const max = Math.max(1, ...data.map((d) => d.value));
+  if (!data.length) return <p style={{ color: C.sub, margin: 0 }}>Sin gastos en este período.</p>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {data.map((d, i) => (
+        <div key={d.label} style={{ display: "grid", gridTemplateColumns: "150px 1fr 90px", alignItems: "center", gap: 10 }}>
+          <div style={{ fontSize: 12, color: "#cbd5e1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={d.label}>{d.label}</div>
+          <div style={{ background: "#0e1530", borderRadius: 6, height: 18 }}>
+            <div style={{ width: Math.max(2, (d.value / max) * 100) + "%", height: "100%", borderRadius: 6, background: PALETA[i % PALETA.length] }} />
+          </div>
+          <div style={{ fontSize: 12, color: "#e2e8f0", textAlign: "right" }}>{fmt(d.value)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Card({ title, children, span }: { title?: string; children: React.ReactNode; span?: number }) {
   return (
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "18px 20px", gridColumn: span ? `span ${span}` : undefined }}>
@@ -72,7 +92,9 @@ export default function App() {
   const [empresas, setEmpresas] = useState<Empresa[]>([]);
   const [rut, setRut] = useState("");
   const [anio, setAnio] = useState(new Date().getFullYear());
+  const [mes, setMes] = useState(""); // "" = todo el año, o "01".."12"
   const [periodos, setPeriodos] = useState<Periodo[]>([]);
+  const [gastos, setGastos] = useState<{ label: string; value: number }[]>([]);
   const [estado, setEstado] = useState("Cargando…");
 
   // sincronización manual
@@ -98,6 +120,19 @@ export default function App() {
   }
 
   useEffect(() => { if (rut) { localStorage.setItem("tx_rut", rut); setEstado("Cargando…"); cargarPeriodos(); } }, [rut]);
+
+  // Gasto por tipo (categoría) para el alcance año / año+mes.
+  useEffect(() => {
+    if (!rut) { setGastos([]); return; }
+    (async () => {
+      let q = supabase.from("tx_facturas").select("categoria, total").eq("rut", rut).eq("tipo", "compra");
+      q = mes ? q.eq("periodo", String(anio) + mes) : q.gte("periodo", String(anio) + "01").lte("periodo", String(anio) + "12");
+      const { data } = await q;
+      const acc: Record<string, number> = {};
+      (data || []).forEach((f: any) => { const k = f.categoria || "Otros"; acc[k] = (acc[k] || 0) + (Number(f.total) || 0); });
+      setGastos(Object.entries(acc).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value));
+    })();
+  }, [rut, anio, mes]);
 
   async function actualizar() {
     if (!rut || !/^\d{6}$/.test(periodoSync)) { setMsg("Indica el periodo AAAAMM (ej. 202512)"); return; }
@@ -166,6 +201,10 @@ export default function App() {
             <select value={anio} onChange={(e) => setAnio(Number(e.target.value))} style={selStyle}>
               {aniosDisp.map((y) => <option key={y} value={y}>{y}</option>)}
             </select>
+            <select value={mes} onChange={(e) => setMes(e.target.value)} style={selStyle}>
+              <option value="">Todo el año</option>
+              {MESES.map((m, i) => <option key={m} value={String(i + 1).padStart(2, "0")}>{m}</option>)}
+            </select>
           </div>
         </header>
 
@@ -189,6 +228,12 @@ export default function App() {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 18 }}>
               <Card title={`Litros de diésel por mes · ${anio}`}><Bars data={serieMes("litros")} color="linear-gradient(180deg,#2dd4bf,#0e7490)" fmt={(v) => Math.round(v).toLocaleString("es-CL")} /></Card>
               <Card title={`Crédito 544 por mes · ${anio}`}><Bars data={serieMes("credito_544")} color="linear-gradient(180deg,#38bdf8,#0369a1)" fmt={(v) => Math.round(v / 1000) + "k"} /></Card>
+            </div>
+
+            <div style={{ marginBottom: 18 }}>
+              <Card title={`Gasto por tipo · ${mes ? MESES[Number(mes) - 1] + " " : ""}${anio} (total con IVA)`}>
+                <HBars data={gastos} fmt={clp} />
+              </Card>
             </div>
 
             <Card title={`Detalle mensual ${anio}`}>
