@@ -32,6 +32,15 @@ const clp = (n: number | null | undefined) => (n == null ? "—" : "$" + Math.ro
 const numL = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString("es-CL", { maximumFractionDigits: 0 }));
 const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 const C = { card: "#1e293b", border: "#283548", sub: "#94a3b8", accent: "#5eead4", ink: "#f1f5f9" };
+// Años disponibles para los selectores (2025 → año actual).
+const ANIOS = (() => { const a: string[] = []; for (let y = 2025; y <= new Date().getFullYear(); y++) a.push(String(y)); return a.reverse(); })();
+// Lista de períodos "AAAAMM" entre desde y hasta (inclusive); vacía si desde > hasta.
+function mesesEntre(desde: string, hasta: string): string[] {
+  if (!/^\d{6}$/.test(desde) || !/^\d{6}$/.test(hasta) || desde > hasta) return [];
+  const out: string[] = []; let y = +desde.slice(0, 4), m = +desde.slice(4, 6); const yh = +hasta.slice(0, 4), mh = +hasta.slice(4, 6);
+  for (let i = 0; i < 120; i++) { out.push("" + y + String(m).padStart(2, "0")); if (y === yh && m === mh) break; m++; if (m > 12) { m = 1; y++; } }
+  return out;
+}
 
 // ---------- mini gráfico de barras (sin librerías) ----------
 function Bars({ data, color, fmt }: { data: { label: string; value: number }[]; color: string; fmt: (v: number) => string }) {
@@ -97,16 +106,20 @@ export default function App() {
   const [gastos, setGastos] = useState<{ label: string; value: number }[]>([]);
   const [estado, setEstado] = useState("Cargando…");
 
-  // sincronización manual
-  const [periodoSync, setPeriodoSync] = useState("");
+  // sincronización por rango con barra de progreso
+  const [desdeSync, setDesdeSync] = useState("");
+  const [hastaSync, setHastaSync] = useState("");
   const [sincronizando, setSincronizando] = useState(false);
+  const [prog, setProg] = useState<{ done: number; total: number; label: string } | null>(null);
+  const [syncLog, setSyncLog] = useState<string[]>([]);
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
     try { setEmpresas(JSON.parse(localStorage.getItem("tx_empresas") || "[]")); } catch { /* */ }
     setRut(localStorage.getItem("tx_rut") || "");
     const h = new Date(); let y = h.getFullYear(), m = h.getMonth(); if (m === 0) { m = 12; y -= 1; }
-    setPeriodoSync("" + y + String(m).padStart(2, "0"));
+    const per = "" + y + String(m).padStart(2, "0");
+    setDesdeSync(per); setHastaSync(per);
   }, []);
 
   async function cargarPeriodos() {
@@ -134,18 +147,30 @@ export default function App() {
     })();
   }, [rut, anio, mes]);
 
-  async function actualizar() {
-    if (!rut || !/^\d{6}$/.test(periodoSync)) { setMsg("Indica el periodo AAAAMM (ej. 202512)"); return; }
-    setSincronizando(true); setMsg("Sincronizando con el SII… (puede tardar)");
-    try {
-      const { data: s } = await supabase.auth.getSession();
-      const token = s.session?.access_token || "";
-      const r = await fetch(FUNCTIONS_URL + "/tracco-ingesta?rut=" + encodeURIComponent(rut) + "&periodo=" + periodoSync, { method: "POST", headers: { Authorization: "Bearer " + token } });
-      const d = await r.json();
-      if (d.ok) { const x = d.resumen?.[0]; setMsg(`✓ ${x?.compras ?? 0} compras · ${numL(x?.litrosTotal)} L · crédito ${clp(x?.credito544)}`); await cargarPeriodos(); }
-      else setMsg("✗ " + (d.error || "error"));
-    } catch { setMsg("✗ Error de red"); }
-    finally { setSincronizando(false); }
+  // Sincroniza mes por mes (barra de progreso real) llamando a la ingesta por período,
+  // con una pausa entre meses para ser suave con el SII.
+  async function sincronizar() {
+    if (!rut) return;
+    const lista = mesesEntre(desdeSync, hastaSync);
+    if (!lista.length) { setMsg("✗ El 'desde' no puede ser mayor que el 'hasta'."); return; }
+    setSincronizando(true); setSyncLog([]); setMsg("");
+    const { data: s } = await supabase.auth.getSession();
+    const token = s.session?.access_token || "";
+    for (let i = 0; i < lista.length; i++) {
+      const per = lista[i];
+      setProg({ done: i, total: lista.length, label: per });
+      try {
+        const r = await fetch(FUNCTIONS_URL + "/tracco-ingesta?rut=" + encodeURIComponent(rut) + "&periodo=" + per, { method: "POST", headers: { Authorization: "Bearer " + token } });
+        const d = await r.json();
+        const x = d.ok ? d.resumen?.[0] : null;
+        setSyncLog((l) => [...l, d.ok ? `${per}  ✓  ${x?.compras ?? 0} compras · ${numL(x?.litrosTotal)} L · crédito ${clp(x?.credito544)}` : `${per}  ✗  ${d.error || "error"}`]);
+      } catch { setSyncLog((l) => [...l, `${per}  ✗  error de red`]); }
+      if (i < lista.length - 1) await new Promise((res) => setTimeout(res, 1200));
+    }
+    setProg({ done: lista.length, total: lista.length, label: "listo" });
+    await cargarPeriodos();
+    setSincronizando(false);
+    setMsg("✓ Sincronización completa.");
   }
 
   // datos del año seleccionado
@@ -210,12 +235,26 @@ export default function App() {
 
         {seccion === "dashboard" && (
           <>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 18, flexWrap: "wrap" }}>
-              <input value={periodoSync} onChange={(e) => setPeriodoSync(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="AAAAMM" style={{ ...selStyle, width: 110 }} />
-              <button onClick={actualizar} disabled={sincronizando} style={{ padding: "9px 16px", border: 0, borderRadius: 9, background: "#14b8a6", color: "#04212b", fontWeight: 700, cursor: "pointer", opacity: sincronizando ? 0.6 : 1 }}>
-                {sincronizando ? "Sincronizando…" : "Actualizar mes"}
-              </button>
-              {msg && <span style={{ fontSize: 13, color: "#cdd6ef" }}>{msg}</span>}
+            <div style={{ marginBottom: 18 }}>
+              <Card title="Sincronizar con el SII">
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, color: C.sub }}>Desde</span><PerSelect value={desdeSync} onChange={setDesdeSync} />
+                  <span style={{ fontSize: 12, color: C.sub }}>Hasta</span><PerSelect value={hastaSync} onChange={setHastaSync} />
+                  <button onClick={sincronizar} disabled={sincronizando} style={{ padding: "9px 18px", border: 0, borderRadius: 9, background: "#14b8a6", color: "#04212b", fontWeight: 700, cursor: "pointer", opacity: sincronizando ? 0.6 : 1 }}>
+                    {sincronizando ? "Sincronizando…" : "Sincronizar"}
+                  </button>
+                </div>
+                {prog && (
+                  <div style={{ marginTop: 14 }}>
+                    <div style={{ height: 10, background: "#0e1530", borderRadius: 6, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: (prog.total ? prog.done / prog.total * 100 : 0) + "%", background: "linear-gradient(90deg,#2dd4bf,#0ea5e9)", transition: "width .3s" }} />
+                    </div>
+                    <div style={{ fontSize: 12, color: C.sub, marginTop: 6 }}>{prog.done}/{prog.total}{prog.label !== "listo" ? ` · ${prog.label}…` : " · listo ✓"}</div>
+                  </div>
+                )}
+                {syncLog.length > 0 && <div style={{ marginTop: 10, maxHeight: 150, overflow: "auto", fontSize: 12, color: "#cbd5e1", fontFamily: "ui-monospace, monospace", lineHeight: 1.6 }}>{syncLog.map((l, i) => <div key={i}>{l}</div>)}</div>}
+                {msg && <div style={{ fontSize: 13, color: C.accent, marginTop: 8 }}>{msg}</div>}
+              </Card>
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 18 }}>
@@ -266,7 +305,7 @@ export default function App() {
 
         {seccion === "facturas" && <Facturas rut={rut} anio={anio} />}
         {seccion === "camiones" && <Camiones rut={rut} />}
-        {seccion === "config" && <Configuracion rut={rut} />}
+        {seccion === "config" && <Configuracion rut={rut} onEmpresas={(e, nuevoRut) => { setEmpresas(e); localStorage.setItem("tx_empresas", JSON.stringify(e)); if (nuevoRut) setRut(nuevoRut); }} />}
         {seccion === "f29" && <F29 delAnio={delAnio} anio={anio} empresa={empresaActual} />}
         {seccion === "dj" && <Placeholder titulo="Declaraciones Juradas 1866 / 1867" detalle="Genera los borradores de la DJ 1866 (crédito IEPD) y DJ 1867 a partir de las facturas clasificadas. En construcción — los datos base (IEPD, litros, crédito 544) ya están disponibles por período." />}
       </main>
@@ -279,6 +318,18 @@ const selStyle: React.CSSProperties = { padding: 8, borderRadius: 8, border: "1p
 const td: React.CSSProperties = { padding: 8, borderBottom: "1px solid #1e2a3d", textAlign: "right", color: "#cbd5e1" };
 const tdL: React.CSSProperties = { ...td, textAlign: "left" };
 const trStyle: React.CSSProperties = {};
+
+// Selector de período como dos listas desplegables (año + mes) sobre "AAAAMM".
+function PerSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const y = value.slice(0, 4) || ANIOS[0];
+  const m = value.slice(4, 6) || "01";
+  return (
+    <span style={{ display: "inline-flex", gap: 6 }}>
+      <select value={y} onChange={(e) => onChange(e.target.value + m)} style={selStyle}>{ANIOS.map((yy) => <option key={yy} value={yy}>{yy}</option>)}</select>
+      <select value={m} onChange={(e) => onChange(y + e.target.value)} style={selStyle}>{MESES.map((mm, i) => <option key={mm} value={String(i + 1).padStart(2, "0")}>{mm}</option>)}</select>
+    </span>
+  );
+}
 
 function Kpi({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: boolean }) {
   return (
@@ -335,7 +386,7 @@ function Facturas({ rut, anio }: { rut: string; anio: number }) {
   return (
     <Card title="Facturas de compra clasificadas">
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
-        <input value={periodo} onChange={(e) => setPeriodo(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="AAAAMM" style={{ ...selStyle, width: 110 }} />
+        <PerSelect value={periodo} onChange={setPeriodo} />
         <button onClick={() => setCat("")} style={chip(cat === "")}>Todas</button>
         {cats.map((c) => <button key={c} onClick={() => setCat(c)} style={chip(cat === c)}>{c}</button>)}
       </div>
@@ -424,9 +475,28 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 // ---------- Configuración ----------
-function Configuracion({ rut }: { rut: string }) {
+function Configuracion({ rut, onEmpresas }: { rut: string; onEmpresas: (e: Empresa[], nuevoRut?: string) => void }) {
   const [cfg, setCfg] = useState<Config | null>(null);
   const [msg, setMsg] = useState("");
+  // Agregar empresa (RUT) validando contra el SII.
+  const [nuevoRut, setNuevoRut] = useState("");
+  const [addMsg, setAddMsg] = useState("");
+  const [agregando, setAgregando] = useState(false);
+
+  async function agregarRut() {
+    const r = nuevoRut.trim().toUpperCase().replace(/\s/g, "");
+    if (!/^\d{7,8}-[\dkK]$/.test(r)) { setAddMsg("✗ Formato de RUT inválido (ej. 12345678-9)."); return; }
+    setAgregando(true); setAddMsg("Validando contra el SII…");
+    try {
+      const { data: s } = await supabase.auth.getSession();
+      const token = s.session?.access_token || "";
+      const res = await fetch(FUNCTIONS_URL + "/tracco-add-rut", { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ rut: r }) });
+      const d = await res.json();
+      if (d.ok) { onEmpresas(d.empresas || [], d.rut); setAddMsg(`✓ ${r} agregado. Ya aparece en el selector de empresas.`); setNuevoRut(""); }
+      else setAddMsg("✗ " + (d.error || "No se pudo agregar"));
+    } catch { setAddMsg("✗ Error de red"); }
+    finally { setAgregando(false); }
+  }
 
   useEffect(() => {
     if (!rut) return;
@@ -445,8 +515,22 @@ function Configuracion({ rut }: { rut: string }) {
     setMsg(error ? "✗ " + error.message : "✓ Guardado");
   }
 
-  if (!cfg) return <Card title="Configuración por RUT"><p style={{ color: C.sub }}>Cargando…</p></Card>;
+  const addRutCard = (
+    <Card title="Agregar empresa (RUT)">
+      <p style={{ color: C.sub, fontSize: 12.5, margin: "0 0 12px" }}>Escribe un RUT que representes en el SII. Se valida contra el SII: si tienes acceso, se agrega y empieza a rescatar; si no, te avisa.</p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <input value={nuevoRut} onChange={(e) => setNuevoRut(e.target.value)} placeholder="12345678-9" style={{ ...inp, width: 180 }} />
+        <button onClick={agregarRut} disabled={agregando} style={{ padding: "9px 18px", border: 0, borderRadius: 9, background: "#14b8a6", color: "#04212b", fontWeight: 700, cursor: "pointer", opacity: agregando ? 0.6 : 1 }}>{agregando ? "Validando…" : "Agregar"}</button>
+        {addMsg && <span style={{ fontSize: 13, color: addMsg.startsWith("✓") ? C.accent : "#cdd6ef" }}>{addMsg}</span>}
+      </div>
+    </Card>
+  );
+
+  if (!cfg) return <>{addRutCard}<div style={{ height: 16 }} /><Card title="Configuración por RUT"><p style={{ color: C.sub }}>{rut ? "Cargando…" : "Selecciona una empresa."}</p></Card></>;
   return (
+    <>
+    {addRutCard}
+    <div style={{ height: 16 }} />
     <Card title={`Configuración — ${cfg.razon_social || rut}`}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, maxWidth: 640 }}>
         <Field label="Razón social"><input value={cfg.razon_social || ""} onChange={(e) => setCfg({ ...cfg, razon_social: e.target.value })} style={inp} /></Field>
@@ -461,6 +545,7 @@ function Configuracion({ rut }: { rut: string }) {
         {msg && <span style={{ fontSize: 13, color: "#cdd6ef" }}>{msg}</span>}
       </div>
     </Card>
+    </>
   );
 }
 
