@@ -98,6 +98,30 @@ function clasificar(f: any, cats: { nombre: string; palabras_clave: string[] }[]
   for (const c of cats) { if ((c.palabras_clave || []).some((k) => k && hay.includes(k.toUpperCase()))) return c.nombre; }
   return "Otros";
 }
+// RCV de VENTAS del periodo (ingresos) usando el mismo token de clave.
+async function ventasRCV(jar: Jar, token: string, rutCompleto: string, periodo: string): Promise<any[]> {
+  const [rut, dv] = rutCompleto.split("-");
+  const body = { metaData: { namespace: "cl.sii.sdi.lob.diii.consdcv.data.api.interfaces.FacadeService/getDetalleVentaExport", conversationId: token, transactionId: crypto.randomUUID(), page: null }, data: { rutEmisor: rut, dvEmisor: dv, ptributario: periodo, codTipoDoc: 0, operacion: "VENTA", estadoContab: "REGISTRO", accionRecaptcha: "RCV_DDETC", tokenRecaptcha: "t-o-k-e-n-web" } };
+  const r = await fetch("https://www4.sii.cl/consdcvinternetui/services/data/facadeService/getDetalleVentaExport", { method: "POST", headers: { "Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "Origin": "https://www4.sii.cl", "Referer": "https://www4.sii.cl/consdcvinternetui/", "Cookie": jar.header() }, body: JSON.stringify(body) });
+  if (r.status !== 200) return [];
+  let parsed: any; try { parsed = JSON.parse(await r.text()); } catch { return []; }
+  let arr: any[] | null = Array.isArray(parsed) ? parsed : null;
+  if (!arr && parsed && typeof parsed === "object") for (const k of Object.keys(parsed)) if (Array.isArray(parsed[k])) { arr = parsed[k]; break; }
+  if (!arr || arr.length < 2) return [];
+  const H = String(arr[0]).split(";").map((h) => h.trim()); const col = (...ns: string[]) => { for (const n of ns) { const i = H.findIndex((h) => h.toLowerCase() === n.toLowerCase()); if (i >= 0) return i; } return -1; };
+  const iR = col("RUT cliente", "Rut cliente", "RUT Receptor"), iN = col("Razon Social"), iF = col("Folio"), iFe = col("Fecha Docto"), iT = col("Tipo Doc"), iNeto = col("Monto Neto"), iEx = col("Monto Exento"), iIva = col("Monto IVA", "Monto IVA Recuperable"), iTot = col("Monto Total");
+  return arr.slice(1).map((l: any) => { const c = String(l).split(";"); return { rutContraparte: iR >= 0 ? c[iR] : null, razonSocial: iN >= 0 ? c[iN] : null, tipoDte: parseInt(c[iT], 10) || null, folio: (c[iF] || "").trim(), fechaEmision: fechaISO(c[iFe]), neto: numCLP(c[iNeto]), exento: iEx >= 0 ? numCLP(c[iEx]) : 0, iva: iIva >= 0 ? numCLP(c[iIva]) : 0, total: numCLP(c[iTot]) }; });
+}
+// Fallback de clasificacion con IA (Claude Haiku) para los gastos "Otros".
+async function clasificarIA(pend: any[], cats: { nombre: string }[], apiKey: string): Promise<Record<string, string>> {
+  const nombres = cats.map((c) => c.nombre).concat(["Otros"]);
+  const lista = pend.map((p) => ({ folio: p.folio, proveedor: p.razonSocial, giro: p.giro, items: (p.items || []).slice(0, 3) }));
+  const prompt = "Eres clasificador de gastos de una empresa chilena de transporte de carga. Clasifica cada factura en UNA de estas categorias EXACTAS: " + nombres.join(", ") + ". Responde SOLO un objeto JSON {\"<folio>\":\"<categoria>\"} sin texto adicional. Facturas: " + JSON.stringify(lista);
+  const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 1024, messages: [{ role: "user", content: prompt }] }) });
+  if (!r.ok) return {};
+  const d = await r.json(); const txt = d?.content?.[0]?.text || "";
+  try { const m = txt.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : {}; } catch { return {}; }
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -145,14 +169,34 @@ Deno.serve(async (req: Request) => {
         const categoria = clasificar(f, catsOrd);
         return { rut: rutContrib, tipo: "compra", tipo_dte: c.tipoDte, folio: c.folio, rut_contraparte: c.rutContraparte, razon_social: c.razonSocial, fecha_emision: c.fechaEmision, fecha_recepcion: c.fechaRecepcion, periodo, neto: c.neto, iva: c.iva, exento: c.exento, total: c.total, iepd: c.iepd, cod_otro_impuesto: c.codOtroImp, litros: f.litros, categoria, subcategoria: det.giro || null, clasif_origen: "regla", raw: { giro: det.giro, items: det.items } };
       });
+      // Fallback IA para los "Otros" (proveedor con giro/items pero sin regla).
+      const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+      if (apiKey) {
+        const pend = filas.filter((f) => f.categoria === "Otros" && ((f.raw?.giro) || (f.raw?.items || []).length));
+        if (pend.length) {
+          try {
+            const mapIA = await clasificarIA(pend.map((f) => ({ folio: f.folio, razonSocial: f.razon_social, giro: f.raw?.giro, items: f.raw?.items })), catsOrd, apiKey);
+            for (const f of filas) { const cat = mapIA[f.folio]; if (cat && f.categoria === "Otros") { f.categoria = cat; f.clasif_origen = "ia"; } }
+          } catch { /* sigue con la regla */ }
+        }
+      }
       if (filas.length) { const { error } = await admin.from("tx_facturas").upsert(filas, { onConflict: "rut,tipo,tipo_dte,folio" }); if (error) return json({ ok: false, error: "upsert tx_facturas: " + error.message, periodo }, 500); }
+
+      // VENTAS -> ingresos del periodo.
+      const ventas = await ventasRCV(jar, token, rutContrib, periodo);
+      if (ventas.length) {
+        const filasV = ventas.map((v) => ({ rut: rutContrib, tipo: "venta", tipo_dte: v.tipoDte, folio: v.folio, rut_contraparte: v.rutContraparte, razon_social: v.razonSocial, fecha_emision: v.fechaEmision, periodo, neto: v.neto, iva: v.iva, exento: v.exento, total: v.total, categoria: "Venta", clasif_origen: "regla" }));
+        await admin.from("tx_facturas").upsert(filasV, { onConflict: "rut,tipo,tipo_dte,folio" });
+      }
+      const ingresos = ventas.reduce((a, x) => a + (x.neto || 0) + (x.exento || 0), 0);
 
       const iepdTotal = filas.reduce((a, x) => a + (x.iepd || 0), 0);
       const litrosTotal = +filas.reduce((a, x) => a + (x.litros || 0), 0).toFixed(2);
       const credito544 = Math.round(iepdTotal * tramo / 100);
-      await admin.from("tx_periodos").upsert({ rut: rutContrib, periodo, litros: litrosTotal, iepd_total: iepdTotal, credito_544: credito544, updated_at: new Date().toISOString() }, { onConflict: "rut,periodo" });
+      const ingresoPorLitro = litrosTotal > 0 ? +(ingresos / litrosTotal).toFixed(2) : null;
+      await admin.from("tx_periodos").upsert({ rut: rutContrib, periodo, litros: litrosTotal, iepd_total: iepdTotal, credito_544: credito544, ingresos, ingreso_por_litro: ingresoPorLitro, updated_at: new Date().toISOString() }, { onConflict: "rut,periodo" });
       const porCat: Record<string, number> = {}; for (const f of filas) porCat[f.categoria] = (porCat[f.categoria] || 0) + 1;
-      resumen.push({ periodo, facturas: filas.length, conDetalle: Object.keys(detalle).length, iepdTotal, litrosTotal, credito544, porCategoria: porCat });
+      resumen.push({ periodo, compras: filas.length, ventas: ventas.length, conDetalle: Object.keys(detalle).length, iepdTotal, litrosTotal, credito544, ingresos, ingresoPorLitro, porCategoria: porCat });
     }
     return json({ ok: true, rut: rutContrib, via: "clave", meses: meses.length, resumen });
   } catch (e) {
