@@ -52,19 +52,24 @@ Deno.serve(async (req: Request) => {
     const URL_S = Deno.env.get("SUPABASE_URL")!, KEY_S = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const admin = createClient(URL_S, KEY_S, { auth: { persistSession: false } });
 
-    // 1) Correo autorizado y activo.
+    // 1) Correo autorizado y activo (un admin lo habilita una vez en tx_usuarios).
     const { data: u } = await admin.from("tx_usuarios").select("email, activo, nombre, rol").eq("email", em).maybeSingle();
     if (!u || !u.activo) return json({ ok: false, error: "Correo no autorizado" }, 403);
 
-    // 2) RUTs autorizados para ese correo (selector de empresa).
-    const { data: urs } = await admin.from("tx_usuario_rut").select("rut").eq("email", em);
-    const ruts = (urs || []).map((x: any) => x.rut);
-    if (!ruts.length) return json({ ok: false, error: "El correo no tiene RUT asignado" }, 403);
-
-    // 3) Validar RUT + clave contra el SII.
+    // 2) Validar RUT + clave contra el SII (prueba que la persona controla ese RUT).
     let okSII = false;
     try { okSII = await validarSII(rutN, clave); } catch { okSII = false; }
     if (!okSII) return json({ ok: false, error: "RUT o clave del SII no válidos (o el SII está limitando; reintenta en un minuto)" }, 401);
+
+    // 3) Auto-provision: como el SII valido la identidad, aseguramos el contribuyente
+    //    y el vinculo correo<->RUT (sin que un admin tenga que pre-cargar cada RUT).
+    await admin.from("tx_contribuyentes").upsert({ rut: rutN }, { onConflict: "rut", ignoreDuplicates: true });
+    await admin.from("tx_usuario_rut").upsert({ email: em, rut: rutN, rol: u.rol || "cliente" }, { onConflict: "email,rut", ignoreDuplicates: true });
+
+    // 4) RUTs autorizados del correo (incluye el recien provisionado) -> selector.
+    const { data: urs } = await admin.from("tx_usuario_rut").select("rut").eq("email", em);
+    const ruts = (urs || []).map((x: any) => x.rut);
+    if (!ruts.length) return json({ ok: false, error: "El correo no tiene RUT asignado" }, 403);
 
     // 4) Emitir sesion Supabase passwordless (sin enviar correo).
     try { await admin.auth.admin.createUser({ email: em, email_confirm: true }); } catch { /* ya existe */ }
