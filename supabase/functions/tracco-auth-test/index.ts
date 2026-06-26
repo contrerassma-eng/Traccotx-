@@ -1,8 +1,9 @@
-// Tracco Tx - Edge Function v15 (Deno / Supabase)
-// v15: barrido con ventanas crecientes (dia -> mes -> mes..fin periodo) iterando
-// hasta llenar los litros de cada folio (el RUT_EMI/FOLIO lo rechaza el SII). Ademas
-// vuelca la estructura del <Detalle> de folios sin litros para ajustar el parser
-// (COPEC trae otro formato). (v13 DOWNLOAD=XML; v12 selector mipeSelEmpresa.) RUT: ?rut= o secreto.
+// Tracco Tx - Edge Function v16 (Deno / Supabase)
+// v16: parser universal de litros + auto-sanacion. parseXmlLitros soporta el formato
+// estandar (<QtyItem>) y el de COPEC (linea con <CodImpAdic>28</CodImpAdic> y litros
+// en el texto de <DscItem>). Si un proveedor trae OTRA estructura, su <Documento>
+// crudo se devuelve en "sinParser" + un "promptPatch" para generar la regla con IA.
+// Barrido de ventanas crecientes para cubrir el tope ~20 docs. RUT: ?rut= o secreto.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -162,6 +163,19 @@ async function leerXmlsLitros(logs: string[]): Promise<Record<string, number>> {
   }
   return map;
 }
+// Normaliza un numero chileno/internacional a float. "100,22"->100.22,
+// "1.234,56"->1234.56, "100.220"->100.22 (la magnitud de litros lo confirma).
+function num(s: string): number {
+  s = (s || "").trim();
+  if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (s.includes(",")) s = s.replace(",", ".");
+  return parseFloat(s) || 0;
+}
+// Extrae folio -> litros de diesel. Soporta dos estructuras:
+//  (a) Estandar: cantidad en <QtyItem> de una linea de diesel (NmbItem/Dsc o UnmdItem en L).
+//  (b) COPEC y similares: linea con <CodImpAdic>28</CodImpAdic>; los litros van en el
+//      texto de <DscItem> ("... 100.220|L" / "100,220 Litro"). Se toma SOLO esa linea
+//      para no duplicar con la linea "Total".
 function parseXmlLitros(xml: string, map: Record<string, number>) {
   const docs = xml.split(/<Documento[\s>]/).slice(1);
   for (const d of docs) {
@@ -173,10 +187,18 @@ function parseXmlLitros(xml: string, map: Record<string, number>) {
     for (const det of dets) {
       const body = det.split(/<\/Detalle>/)[0];
       const nombre = (body.match(/<NmbItem>([^<]*)<\/NmbItem>/) || ["", ""])[1];
+      const desc = (body.match(/<DscItem>([^<]*)<\/DscItem>/) || ["", ""])[1];
       const unidad = (body.match(/<UnmdItem>([^<]*)<\/UnmdItem>/) || ["", ""])[1];
       const qm = body.match(/<QtyItem>([\d.,]+)<\/QtyItem>/);
-      const esDiesel = /diesel|petr[oó]leo/i.test(nombre) || /^(lt|lts|litro|litros|l)$/i.test(unidad.trim());
-      if (qm && esDiesel) { const q = qm[1].includes(",") && !qm[1].includes(".") ? qm[1].replace(",", ".") : qm[1]; litros += parseFloat(q) || 0; }
+      const esDieselTxt = /diesel|petr[oó]leo/i.test(nombre) || /diesel|petr[oó]leo/i.test(desc);
+      if (qm && (esDieselTxt || /^(lt|lts|litro|litros|l)$/i.test(unidad.trim()))) {
+        litros += num(qm[1]);
+        continue;
+      }
+      if (/<CodImpAdic>\s*28\s*<\/CodImpAdic>/.test(body) && desc) {
+        const lm = desc.match(/([\d][\d.,]*)\s*\|?\s*(?:litros?|lts?|l)\b/i);
+        if (lm) litros += num(lm[1]);
+      }
     }
     if (litros > 0) map[folio] = +litros.toFixed(2);
   }
@@ -259,15 +281,14 @@ async function seleccionarEmpresa(rutCompleto: string, jar: Jar, logs: string[])
   await pr.body?.cancel();
 }
 // Descarga una URL de mipeDownLoad y devuelve folio->litros (maneja ZIP o XML directo).
-async function descargarParse(jar: Jar, url: string, label: string, logs: string[], wanted: string[] = []): Promise<Record<string, number>> {
+async function descargarParse(jar: Jar, url: string, label: string, logs: string[], wanted: string[] = [], muestras?: Record<string, string>): Promise<Record<string, number>> {
   const r = await fetchJar(jar, url, { method: "GET", headers: { "User-Agent": UA } });
   const ct = r.headers.get("content-type") || "";
   const buf = new Uint8Array(await r.arrayBuffer());
   logs.push("      mipeDownLoad " + label + " -> HTTP " + r.status + " | " + ct + " | " + buf.length + " bytes");
   let txt: string;
   if (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b) {
-    const map = litrosDesdeZip(buf, logs);
-    return map;
+    return litrosDesdeZip(buf, logs);
   }
   txt = new TextDecoder("iso-8859-1").decode(buf);
   if (/Error al contribuyente|no ha seleccionado/i.test(txt)) {
@@ -277,15 +298,18 @@ async function descargarParse(jar: Jar, url: string, label: string, logs: string
   const map: Record<string, number> = {};
   parseXmlLitros(txt, map);
   logs.push("      " + label + ": " + Object.keys(map).length + " folios con litros");
-  // Diagnostico: si un folio buscado esta en el XML pero sin litros, volcar su
-  // estructura para ajustar el parser (ej. COPEC trae otro formato de <Detalle>).
+  // Auto-sanacion: si un folio buscado esta en el XML pero el parser no le saco
+  // litros (proveedor con estructura nueva), guardamos su <Documento> crudo para
+  // devolverlo y generar el patch del parser con IA.
   for (const f of wanted) {
     if (map[f] != null) continue;
     const docs = txt.split(/<Documento[\s>]/);
     for (const d of docs) {
       if (d.indexOf("<Folio>" + f + "</Folio>") >= 0) {
+        const doc = "<Documento " + d.split(/<\/Documento>/)[0] + "</Documento>";
+        if (muestras && !muestras[f]) muestras[f] = doc.slice(0, 4000);
         const det = d.match(/<Detalle>[\s\S]*?<\/Detalle>/i);
-        logs.push("      [estructura folio " + f + "] " + (det ? det[0] : d.slice(0, 700)).replace(/\s+/g, " ").slice(0, 1100));
+        logs.push("      [estructura folio " + f + "] " + (det ? det[0] : d.slice(0, 700)).replace(/\s+/g, " ").slice(0, 900));
         break;
       }
     }
@@ -296,7 +320,7 @@ async function descargarParse(jar: Jar, url: string, label: string, logs: string
 // periodo y, para cada folio de diesel que falte, hace una descarga dirigida por
 // proveedor+folio con una ventana que cubre el mes del documento hasta el periodo
 // (resuelve el tope ~20 docs y los recibidos en un mes pero emitidos en otro).
-async function obtenerLitros(rutCompleto: string, periodo: string, diesel: any[], jar: Jar, logs: string[]): Promise<Record<string, number>> {
+async function obtenerLitros(rutCompleto: string, periodo: string, diesel: any[], jar: Jar, logs: string[]): Promise<{ map: Record<string, number>, sinParser: any[] }> {
   const y = periodo.slice(0, 4), m = periodo.slice(4, 6);
   const last = new Date(+y, +m, 0).getDate();
   const desde = y + "-" + m + "-01", hasta = y + "-" + m + "-" + String(last).padStart(2, "0");
@@ -318,7 +342,8 @@ async function obtenerLitros(rutCompleto: string, periodo: string, diesel: any[]
     : "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
   bulkUrl = /DOWNLOAD=/i.test(bulkUrl) ? bulkUrl.replace(/DOWNLOAD=[^&]*/i, "DOWNLOAD=XML") : bulkUrl + "&DOWNLOAD=XML";
   const wanted = diesel.map((x: any) => String(x.folio));
-  const map = await descargarParse(jar, bulkUrl, "(masivo)", logs, wanted);
+  const muestras: Record<string, string> = {};
+  const map = await descargarParse(jar, bulkUrl, "(masivo)", logs, wanted, muestras);
 
   // Descarga dirigida con ventanas CRECIENTES para los folios sin litros, sin filtro
   // por proveedor (el SII rechaza RUT_EMI/FOLIO). Se itera ampliando el rango hasta
@@ -342,13 +367,16 @@ async function obtenerLitros(rutCompleto: string, periodo: string, diesel: any[]
       if (rangosHechos.has(key)) continue;
       rangosHechos.add(key);
       logs.push("      [dirigido] folio " + d.folio + " ventana " + key);
-      const m2 = await descargarParse(jar, dl(fd, fh), key, logs, wanted);
+      const m2 = await descargarParse(jar, dl(fd, fh), key, logs, wanted, muestras);
       for (const k in m2) if (map[k] == null) map[k] = m2[k];
     }
   }
-  const faltan = diesel.filter((x: any) => map[x.folio] == null).map((x: any) => x.folio);
-  if (faltan.length) logs.push("      Folios sin litros tras barrido: " + faltan.join(", "));
-  return map;
+  const faltan = diesel.filter((x: any) => map[x.folio] == null);
+  if (faltan.length) logs.push("      Folios sin litros tras barrido: " + faltan.map((x: any) => x.folio).join(", "));
+  // Payload de auto-sanacion: XML crudo de los folios que no se pudieron leer, para
+  // generar con IA el patch del parser de ese proveedor.
+  const sinParser = faltan.map((x: any) => ({ folio: x.folio, razonSocial: x.razonSocial, rut: x.rut, iepd: x.iepd, xml: muestras[x.folio] || null }));
+  return { map, sinParser };
 }
 function litrosDesdeZip(buf: Uint8Array, logs: string[]): Record<string, number> {
   const map: Record<string, number> = {};
@@ -409,12 +437,15 @@ Deno.serve(async (req: Request) => {
 
     logs.push("      Obteniendo litros por folio...");
     let litrosMap: Record<string, number> = {};
+    let sinParser: any[] = [];
     const claveSII = Deno.env.get("CLAVE_SII");
     if (claveSII && diesel.length) {
       const jar = new Jar();
       logs.push("      Iniciando sesion en el SII con clave...");
       await loginClave(rutContrib, claveSII, jar, logs);
-      litrosMap = await obtenerLitros(rutContrib, periodo, diesel, jar, logs);
+      const res = await obtenerLitros(rutContrib, periodo, diesel, jar, logs);
+      litrosMap = res.map;
+      sinParser = res.sinParser;
     } else {
       litrosMap = await leerXmlsLitros(logs);
     }
@@ -422,7 +453,14 @@ Deno.serve(async (req: Request) => {
     for (const d of diesel) { d.litros = litrosMap[d.folio] ?? null; if (d.litros) { totalLitros += d.litros; conLitros++; } }
     logs.push("      Litros cruzados: " + conLitros + "/" + diesel.length + " facturas | total " + (+totalLitros.toFixed(2)).toLocaleString("es-CL") + " L");
 
-    return json({ ok: true, titular: cn, periodo, totalDocumentos, facturasDiesel: diesel.length, totalIEPD, credito544_80pct: credito544, totalLitros: +totalLitros.toFixed(2), diesel, logs });
+    // sinParser: folios de diesel cuyo XML no se pudo leer (proveedor con estructura
+    // nueva). Trae el XML crudo para generar el patch del parser con IA.
+    const out: any = { ok: true, titular: cn, periodo, totalDocumentos, facturasDiesel: diesel.length, totalIEPD, credito544_80pct: credito544, totalLitros: +totalLitros.toFixed(2), litrosCruzados: conLitros, diesel, logs };
+    if (sinParser.length) {
+      out.sinParser = sinParser;
+      out.promptPatch = "Eres un parser de DTE del SII. Para cada item de 'sinParser', analiza el XML del <Documento> e indica como extraer los LITROS de diesel (tag/atributo/regex), devolviendo una regla para parseXmlLitros. Identifica la linea de diesel (suele tener <CodImpAdic>28</CodImpAdic>).";
+    }
+    return json(out);
   } catch (e) {
     logs.push("ERROR: " + ((e as Error).message || String(e)));
     return json({ ok: false, error: (e as Error).message, logs });
