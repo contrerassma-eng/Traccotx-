@@ -1,8 +1,9 @@
-// Tracco Tx - Edge Function v13 (Deno / Supabase)
-// v13: seleccion de empresa OK y la lista carga (25KB). El link de descarga de la
-// pagina trae DOWNLOAD vacio (el boton "Archivo Respaldo" lo setea a XML por JS),
-// asi que se fuerza DOWNLOAD=XML para bajar el respaldo con litros.
-// (v12 fijo el selector real mipeSelEmpresa.cgi). RUT por ?rut= o secreto.
+// Tracco Tx - Edge Function v14 (Deno / Supabase)
+// v14: robustez de litros. La descarga masiva trae ~20 docs y filtra por fecha de
+// emision, por lo que faltaban folios (ej. COPEC emitido el mes anterior). Ahora,
+// tras el respaldo masivo, se hace una descarga DIRIGIDA por proveedor+folio con
+// ventana desde el mes del documento, hasta cazar cada folio de diesel.
+// (v13 forzo DOWNLOAD=XML; v12 fijo el selector mipeSelEmpresa.cgi.) RUT: ?rut= o secreto.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -258,45 +259,66 @@ async function seleccionarEmpresa(rutCompleto: string, jar: Jar, logs: string[])
   logs.push("      Enviar empresa -> HTTP " + pr.status + " | action=" + actionUrl + " | cookies:[" + [...jar.cookies.keys()].join(",") + "]");
   await pr.body?.cancel();
 }
-async function bajarRespaldoZip(rutCompleto: string, periodo: string, jar: Jar, logs: string[]): Promise<Uint8Array | null> {
+// Descarga una URL de mipeDownLoad y devuelve folio->litros (maneja ZIP o XML directo).
+async function descargarParse(jar: Jar, url: string, label: string, logs: string[]): Promise<Record<string, number>> {
+  const r = await fetchJar(jar, url, { method: "GET", headers: { "User-Agent": UA } });
+  const ct = r.headers.get("content-type") || "";
+  const buf = new Uint8Array(await r.arrayBuffer());
+  logs.push("      mipeDownLoad " + label + " -> HTTP " + r.status + " | " + ct + " | " + buf.length + " bytes");
+  if (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b) return litrosDesdeZip(buf, logs);
+  const txt = new TextDecoder("iso-8859-1").decode(buf);
+  if (/Error al contribuyente|no ha seleccionado/i.test(txt)) {
+    logs.push("      (error SII en " + label + "): " + txt.replace(/\s+/g, " ").slice(0, 160));
+    return {};
+  }
+  const map: Record<string, number> = {};
+  parseXmlLitros(txt, map);
+  logs.push("      " + label + ": " + Object.keys(map).length + " folios con litros");
+  return map;
+}
+// Orquesta la obtencion de litros: selecciona empresa, baja el respaldo masivo del
+// periodo y, para cada folio de diesel que falte, hace una descarga dirigida por
+// proveedor+folio con una ventana que cubre el mes del documento hasta el periodo
+// (resuelve el tope ~20 docs y los recibidos en un mes pero emitidos en otro).
+async function obtenerLitros(rutCompleto: string, periodo: string, diesel: any[], jar: Jar, logs: string[]): Promise<Record<string, number>> {
   const y = periodo.slice(0, 4), m = periodo.slice(4, 6);
   const last = new Date(+y, +m, 0).getDate();
   const desde = y + "-" + m + "-01", hasta = y + "-" + m + "-" + String(last).padStart(2, "0");
   const dec = (b: Uint8Array) => new TextDecoder("iso-8859-1").decode(b).replace(/\s+/g, " ");
 
-  // Paso 0: seleccionar la EMPRESA (apretar "Enviar") para fijar el RUT de trabajo.
-  try {
-    await seleccionarEmpresa(rutCompleto, jar, logs);
-  } catch (e) { logs.push("      (seleccion de empresa fallo: " + (e as Error).message + ")"); }
+  try { await seleccionarEmpresa(rutCompleto, jar, logs); }
+  catch (e) { logs.push("      (seleccion de empresa fallo: " + (e as Error).message + ")"); }
 
-  // Paso 1: sembrar la sesión listando los documentos recibidos del rango.
-  // Logueamos la respuesta para saber si la sesión www1 quedo realmente activa
-  // y, sobre todo, para extraer el link de descarga REAL que arma el portal.
+  // Sembrar la sesion listando los recibidos del rango y extraer el link real.
   const seedUrl = "https://www1.sii.cl/cgi-bin/Portal001/mipeAdminDocsRcp.cgi?RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&NUM_PAG=1";
-  const sr = await fetchJar(jar, seedUrl, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi" } });
-  const seedBuf = new Uint8Array(await sr.arrayBuffer());
-  const seedTxt = dec(seedBuf);
-  logs.push("      mipeAdminDocsRcp (seed) -> HTTP " + sr.status + " | " + (sr.headers.get("content-type") || "") + " | " + seedBuf.length + " bytes");
-  logs.push("      seed (recorte): " + seedTxt.slice(0, 500));
+  const sr = await fetchJar(jar, seedUrl, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeSelEmpresa.cgi?DESDE_DONDE_URL=OPCION%3D1%26TIPO%3D4" } });
+  const seedTxt = dec(new Uint8Array(await sr.arrayBuffer()));
+  logs.push("      mipeAdminDocsRcp (seed) -> HTTP " + sr.status + " | " + seedTxt.length + " chars");
   const linkMatch = seedTxt.match(/mipeDownLoad\.cgi[^"'\s>)]*/i);
-  if (linkMatch) logs.push("      LINK REAL de descarga en la pagina: " + linkMatch[0]);
 
-  // Paso 2: descargar. Si el portal expuso un link real, usamos ESE (trae los
-  // parametros exactos que el SII espera); si no, caemos al armado manual.
-  let url = linkMatch
+  // Descarga masiva del periodo (link de la pagina con DOWNLOAD forzado a XML).
+  let bulkUrl = linkMatch
     ? new URL(linkMatch[0].replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString()
     : "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=&FOLIO=&RZN_SOC=&FEC_DESDE=" + desde + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
-  // El link de la pagina trae DOWNLOAD vacio (el boton "Archivo Respaldo" lo setea
-  // a XML por JS). Forzar DOWNLOAD=XML para bajar el respaldo de XML (con litros).
-  url = /DOWNLOAD=/i.test(url) ? url.replace(/DOWNLOAD=[^&]*/i, "DOWNLOAD=XML") : url + "&DOWNLOAD=XML";
-  logs.push("      URL descarga: " + url);
-  const r = await fetchJar(jar, url, { method: "GET", headers: { "User-Agent": UA, "Referer": seedUrl } });
-  const ct = r.headers.get("content-type") || "";
-  const buf = new Uint8Array(await r.arrayBuffer());
-  logs.push("      mipeDownLoad -> HTTP " + r.status + " | " + ct + " | " + buf.length + " bytes");
-  if (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b) return buf;
-  logs.push("      (la respuesta no es ZIP) cuerpo: " + dec(buf).slice(0, 1500));
-  return buf;
+  bulkUrl = /DOWNLOAD=/i.test(bulkUrl) ? bulkUrl.replace(/DOWNLOAD=[^&]*/i, "DOWNLOAD=XML") : bulkUrl + "&DOWNLOAD=XML";
+  const map = await descargarParse(jar, bulkUrl, "(masivo)", logs);
+
+  // Descarga dirigida para los folios de diesel que aun no tienen litros.
+  for (const d of diesel) {
+    if (map[d.folio] != null) continue;
+    const fp = String(d.fecha || "").split(/[/\-]/);
+    let d2 = desde;
+    if (fp.length === 3) { const mm = fp[1].padStart(2, "0"), yy = fp[2]; if (/^\d{4}$/.test(yy)) d2 = yy + "-" + mm + "-01"; }
+    for (const rutEmi of [String(d.rut || "").trim(), String(d.rut || "").split("-")[0].trim()]) {
+      if (!rutEmi) continue;
+      const turl = "https://www1.sii.cl/cgi-bin/Portal001/mipeDownLoad.cgi?ORIGEN=RCP&RUT_EMI=" + encodeURIComponent(rutEmi) + "&FOLIO=" + encodeURIComponent(d.folio) + "&RZN_SOC=&FEC_DESDE=" + d2 + "&FEC_HASTA=" + hasta + "&TPO_DOC=&ESTADO=&ORDEN=&DOWNLOAD=XML";
+      logs.push("      [dirigido] folio " + d.folio + " prov " + rutEmi + " (" + d2 + ".." + hasta + ")");
+      const m2 = await descargarParse(jar, turl, "folio " + d.folio, logs);
+      for (const k in m2) if (map[k] == null) map[k] = m2[k];
+      if (map[d.folio] != null) break;
+    }
+  }
+  return map;
 }
 function litrosDesdeZip(buf: Uint8Array, logs: string[]): Record<string, number> {
   const map: Record<string, number> = {};
@@ -362,8 +384,7 @@ Deno.serve(async (req: Request) => {
       const jar = new Jar();
       logs.push("      Iniciando sesion en el SII con clave...");
       await loginClave(rutContrib, claveSII, jar, logs);
-      const zip = await bajarRespaldoZip(rutContrib, periodo, jar, logs);
-      if (zip) litrosMap = litrosDesdeZip(zip, logs);
+      litrosMap = await obtenerLitros(rutContrib, periodo, diesel, jar, logs);
     } else {
       litrosMap = await leerXmlsLitros(logs);
     }
