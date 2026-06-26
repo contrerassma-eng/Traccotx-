@@ -1,8 +1,8 @@
-// Tracco Tx - Edge Function v11 (Deno / Supabase)
-// v11: el SII confirmo "No ha seleccionado una Empresa". mipeLaunchPage no traia el
-// <form> esperado, asi que se vuelca su HTML completo para ubicar el form/select
-// real de seleccion de empresa. (v10 agrego seleccionarEmpresa; aqui se diagnostica
-// por que no encontro el formulario.) RUT por ?rut= o secreto RUT_CONTRIBUYENTE.
+// Tracco Tx - Edge Function v12 (Deno / Supabase)
+// v12: selector de empresa correcto = mipeSelEmpresa.cgi?DESDE_DONDE_URL=OPCION=1&TIPO=4
+// (URL real capturada del navegador). seleccionarEmpresa lee ese form, elige la
+// opcion del RUT y postea el "Enviar" para fijar la empresa, antes de listar/bajar
+// el ZIP de litros. RUT por ?rut= o secreto RUT_CONTRIBUYENTE.
 // Lee el certificado desde Storage (bucket "certs") y la clave desde el secreto
 // CERT_PASS. Autentica contra el SII y devuelve JSON (Supabase no reescribe JSON).
 // Abrir la URL en el navegador muestra el resultado. Firma con node-forge puro.
@@ -214,15 +214,17 @@ async function loginClave(rutCompleto: string, clave: string, jar: Jar, logs: st
 // de trabajo). Sin esto, mipeAdminDocsRcp devuelve "Error al contribuyente".
 async function seleccionarEmpresa(rutCompleto: string, jar: Jar, logs: string[]): Promise<void> {
   const decFull = (b: Uint8Array) => new TextDecoder("iso-8859-1").decode(b);
-  const r = await fetchJar(jar, "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi", { method: "GET", headers: { "User-Agent": UA } });
+  // El selector real es mipeSelEmpresa.cgi; DESDE_DONDE_URL es el destino tras elegir
+  // (OPCION=1&TIPO=4 = Administracion de documentos recibidos).
+  const selUrl = "https://www1.sii.cl/cgi-bin/Portal001/mipeSelEmpresa.cgi?DESDE_DONDE_URL=OPCION%3D1%26TIPO%3D4";
+  const r = await fetchJar(jar, selUrl, { method: "GET", headers: { "User-Agent": UA, "Referer": "https://www1.sii.cl/Portal001/menuFacturaElectronica.html" } });
   const html = decFull(new Uint8Array(await r.arrayBuffer()));
-  logs.push("      Seleccion empresa (mipeLaunchPage) -> HTTP " + r.status + " | " + html.length + " bytes");
-  logs.push("      launch HTML: " + html.replace(/\s+/g, " ").slice(0, 1200));
+  logs.push("      Seleccion empresa (mipeSelEmpresa) -> HTTP " + r.status + " | " + html.length + " bytes");
 
   const form = html.match(/<form[^>]*>[\s\S]*?<\/form>/i);
-  if (!form) { logs.push("      (no hay form de seleccion en mipeLaunchPage)"); return; }
+  if (!form) { logs.push("      (no hay form de seleccion) HTML: " + html.replace(/\s+/g, " ").slice(0, 1000)); return; }
   const formHtml = form[0];
-  const action = (formHtml.match(/action=["']?([^"'\s>]+)/i) || [])[1] || "mipeLaunchPage.cgi";
+  const action = (formHtml.match(/action=["']?([^"'\s>]+)/i) || [])[1] || "mipeSelEmpresa.cgi";
   const actionUrl = new URL(action.replace(/&amp;/g, "&"), "https://www1.sii.cl/cgi-bin/Portal001/").toString();
 
   const params = new URLSearchParams();
@@ -252,7 +254,7 @@ async function seleccionarEmpresa(rutCompleto: string, jar: Jar, logs: string[])
     logs.push("      (no encontre <select> de empresa en el form)");
   }
 
-  const pr = await fetchJar(jar, actionUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA, "Origin": "https://www1.sii.cl", "Referer": "https://www1.sii.cl/cgi-bin/Portal001/mipeLaunchPage.cgi" }, body: params.toString() });
+  const pr = await fetchJar(jar, actionUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA, "Origin": "https://www1.sii.cl", "Referer": selUrl }, body: params.toString() });
   logs.push("      Enviar empresa -> HTTP " + pr.status + " | action=" + actionUrl + " | cookies:[" + [...jar.cookies.keys()].join(",") + "]");
   await pr.body?.cancel();
 }
