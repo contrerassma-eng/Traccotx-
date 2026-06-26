@@ -144,13 +144,16 @@ Deno.serve(async (req: Request) => {
     const jar = new Jar();
     const token = await loginClave(rutContrib, claveSII, jar);
     if (!token) return json({ ok: false, error: "No se pudo autenticar con la clave (clave incorrecta o el SII está limitando; reintenta en un minuto)" }, 401);
-    const empresaOk = await seleccionarEmpresa(rutContrib, jar).catch(() => false);
+    await seleccionarEmpresa(rutContrib, jar).catch(() => false); // best-effort (RUT con varias empresas)
 
     const resumen: any[] = [];
     for (const periodo of meses) {
       const compras = await comprasRCV(jar, token, rutContrib, periodo);
       let detalle: Record<string, any> = {};
-      if (empresaOk && compras.length) { try { const tpos = [...new Set(compras.map((c) => c.tipoDte).filter(Boolean))] as number[]; detalle = await detallePeriodo(periodo, tpos, jar); } catch { /* sin detalle */ } }
+      // Intentamos el detalle siempre que haya compras: si el RUT tiene una sola
+      // empresa, el portal MIPYME no muestra selector (empresaOk=false) pero la
+      // descarga igual funciona; descargarDte ignora la pagina de error.
+      if (compras.length) { try { const tpos = [...new Set(compras.map((c) => c.tipoDte).filter(Boolean))] as number[]; detalle = await detallePeriodo(periodo, tpos, jar); } catch { /* sin detalle */ } }
 
       const filas = compras.map((c) => {
         const det = detalle[c.folio] || {};
