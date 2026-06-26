@@ -418,29 +418,25 @@ function Facturas({ rut, anio, catOpts }: { rut: string; anio: number; catOpts: 
     await supabase.from("tx_facturas").update({ categoria: nueva, clasif_origen: "manual" }).eq("id", f.id);
   }
 
-  // Descarga un PDF imprimible de la factura (desde los datos guardados).
-  function descargarPdf(f: Factura) {
-    const items = (f.raw?.items || []) as string[];
-    const fila = (k: string, v: string) => `<tr><td style="color:#555;padding:3px 10px 3px 0">${k}</td><td style="font-weight:600">${v}</td></tr>`;
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>DTE ${f.folio}</title></head>
-      <body style="font-family:Arial,sans-serif;max-width:640px;margin:30px auto;color:#111">
-      <h2 style="margin:0 0 2px">Documento ${f.tipo_dte || ""} · Folio ${f.folio}</h2>
-      <div style="color:#666;margin-bottom:16px">Tracco Tx — comprobante interno</div>
-      <table style="border-collapse:collapse;font-size:14px">
-        ${fila("Proveedor", (f.razon_social || "—") + (f.rut_contraparte ? " (" + f.rut_contraparte + ")" : ""))}
-        ${fila("Fecha", f.fecha_emision || "—")}
-        ${fila("Categoría", f.categoria || "Otros")}
-        ${fila("Neto", clp(f.neto))}
-        ${fila("IVA", clp(f.iva ?? 0))}
-        ${fila("Exento", clp(f.exento ?? 0))}
-        ${fila("IEPD (cód. 28)", f.iepd ? clp(f.iepd) : "—")}
-        ${fila("Litros diésel", f.litros ? numL(f.litros) : "—")}
-        ${fila("Total", clp(f.total))}
-      </table>
-      ${items.length ? `<h3 style="margin:18px 0 6px;font-size:13px">Detalle</h3><ul style="font-size:13px;color:#333">${items.map((it) => `<li>${it}</li>`).join("")}</ul>` : ""}
-      <script>window.onload=()=>window.print()</script></body></html>`;
-    const w = window.open("", "_blank");
-    if (w) { w.document.write(html); w.document.close(); }
+  // Abre el PDF OFICIAL del DTE pidiéndolo al SII en vivo (vía tracco-dte).
+  const [pdfBusy, setPdfBusy] = useState("");
+  async function verPdf(f: Factura) {
+    setPdfBusy(f.id);
+    try {
+      const { data: s } = await supabase.auth.getSession();
+      const token = s.session?.access_token || "";
+      const r = await fetch(FUNCTIONS_URL + "/tracco-dte?rut=" + encodeURIComponent(rut) + "&folio=" + encodeURIComponent(f.folio), { headers: { Authorization: "Bearer " + token } });
+      if (!r.ok || !(r.headers.get("content-type") || "").includes("pdf")) {
+        const d = await r.json().catch(() => ({} as any));
+        alert(d.error || "No se pudo obtener el PDF del SII. Si el SII está limitando, reintenta en un minuto.");
+        return;
+      }
+      const blob = await r.blob();
+      const u = URL.createObjectURL(blob);
+      window.open(u, "_blank");
+      setTimeout(() => URL.revokeObjectURL(u), 60000);
+    } catch { alert("Error de red al pedir el PDF."); }
+    finally { setPdfBusy(""); }
   }
 
   const filtradas = cat ? rows.filter((r) => (r.categoria || "Otros") === cat) : rows;
@@ -472,7 +468,7 @@ function Facturas({ rut, anio, catOpts }: { rut: string; anio: number; catOpts: 
               <td style={td}>{r.litros ? numL(r.litros) : "—"}</td>
               <td style={td}>{clp(r.total)}</td>
               <td style={{ ...td, textAlign: "center" }}>
-                <button onClick={() => descargarPdf(r)} title="Descargar PDF" style={{ background: "transparent", border: 0, cursor: "pointer", fontSize: 15 }}>📄</button>
+                <button onClick={() => verPdf(r)} disabled={pdfBusy === r.id} title="Ver PDF oficial del SII" style={{ background: "transparent", border: 0, cursor: "pointer", fontSize: 15, opacity: pdfBusy === r.id ? 0.5 : 1 }}>{pdfBusy === r.id ? "⏳" : "📄"}</button>
               </td>
             </tr>
           ))}
