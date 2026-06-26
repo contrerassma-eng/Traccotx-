@@ -118,6 +118,10 @@ Deno.serve(async (req: Request) => {
     const url = new URL(req.url);
     const rutContrib = (url.searchParams.get("rut") || "").trim();
     if (!rutContrib) return json({ ok: false, error: "Falta ?rut=" }, 400);
+    // RUT con el que se inicia sesion. Por defecto es el mismo contribuyente, pero
+    // para una EIRL sin Portal MIPYME se entra como su representante (persona
+    // natural, que si tiene MIPYME) y luego se selecciona la empresa = rutContrib.
+    const loginRut = (url.searchParams.get("loginRut") || rutContrib).trim();
     const claveSII = Deno.env.get("CLAVE_SII"); if (!claveSII) return json({ ok: false, error: "Falta CLAVE_SII" }, 500);
     const URL_S = Deno.env.get("SUPABASE_URL")!, KEY_S = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const admin = createClient(URL_S, KEY_S, { auth: { persistSession: false } });
@@ -142,13 +146,16 @@ Deno.serve(async (req: Request) => {
 
     // UN solo login con clave para todo (RCV + DTE).
     const jar = new Jar();
-    const token = await loginClave(rutContrib, claveSII, jar);
+    const token = await loginClave(loginRut, claveSII, jar);
     if (!token) return json({ ok: false, error: "No se pudo autenticar con la clave (clave incorrecta o el SII está limitando; reintenta en un minuto)" }, 401);
-    await seleccionarEmpresa(rutContrib, jar).catch(() => false); // best-effort (RUT con varias empresas)
+    await seleccionarEmpresa(rutContrib, jar).catch(() => false); // selecciona la empresa = rutContrib (clave para el modo representante)
 
     const resumen: any[] = [];
     for (const periodo of meses) {
       const compras = await comprasRCV(jar, token, rutContrib, periodo);
+      // Guarda: si no hay compras (p.ej. el SII limitó la sesión o el periodo
+      // está vacío) no sobreescribimos un periodo ya cargado con ceros.
+      if (!compras.length) { resumen.push({ periodo, compras: 0, ventas: 0, conDetalle: 0, omitido: "sin compras (no se sobreescribe)" }); continue; }
       let detalle: Record<string, any> = {};
       // Intentamos el detalle siempre que haya compras: si el RUT tiene una sola
       // empresa, el portal MIPYME no muestra selector (empresaOk=false) pero la
