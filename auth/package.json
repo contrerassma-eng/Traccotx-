@@ -1,0 +1,14 @@
+{
+  "name": "tracco-tx",
+  "version": "0.1.0",
+  "description": "Tracco Tx - automatizacion tributaria SII (Marcelo Contreras)",
+  "main": "test-auth.js",
+  "scripts": {
+    "test-auth": "node test-auth.js"
+  },
+  "dependencies": {
+    "node-forge": "1.3.1",
+    "xml-crypto": "6.0.1",
+    "@xmldom/xmldom": "0.9.6"
+  }
+}

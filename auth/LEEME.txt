@@ -1,0 +1,64 @@
+# Tracco Tx — Prueba 1: autenticación con certificado
+
+Esta es la **prueba de fuego**. Si funciona, todo el resto (bóveda, F29, 1866)
+se construye sobre seguro. Si el SII acepta el certificado, te imprime un TOKEN.
+
+## Pasos (en tu PC Windows, con Node ya instalado)
+
+1. Descomprime `tracco-tx-auth.zip` en una carpeta, por ejemplo:
+   `C:\Users\crami\Downloads\tracco-tx`
+
+2. Copia el certificado de Marcelo a esa carpeta y renómbralo a:
+   `certificado.pfx`
+   (o déjalo donde está y luego pasas la ruta completa)
+
+3. Abre una terminal en esa carpeta (en el explorador, escribe `cmd` en la barra
+   de direcciones y Enter).
+
+4. Instala las dependencias (una sola vez):
+
+   ```
+   npm install
+   ```
+
+5. Corre la prueba:
+
+   ```
+   node test-auth.js
+   ```
+
+   Si dejaste el .pfx en otra ruta, pásala así:
+
+   ```
+   node test-auth.js "C:\ruta\al\Certificado_E-Certchile.pfx"
+   ```
+
+6. Te va a pedir la **clave del certificado**. La escribes (no se ve mientras
+   tecleas, es normal) y Enter.
+
+## Qué deberías ver
+
+```
+[1/4] Leyendo certificado…
+      Titular: MARCELO ANTONIO CONTRERAS MARTINEZ
+[2/4] Pidiendo SEMILLA al SII…
+      Semilla: 0093847651
+[3/4] Firmando la semilla con el certificado…
+[4/4] Pidiendo TOKEN al SII…
+
+========================================
+  ✓✓✓  TOKEN OBTENIDO  ✓✓✓
+  abc123def456...
+========================================
+```
+
+Si ves el TOKEN: **funcionó**. La app web completa es viable. Avísame.
+
+Si ves un error: cópialo tal cual y me lo pasas. Lo corrijo y reintentamos.
+(No me copies el token completo ni la clave; con el mensaje de error basta.)
+
+## Nota de seguridad
+
+- La clave NO se guarda en ningún archivo: se pide en pantalla cada vez.
+- El certificado se queda en tu PC. Esta prueba no lo sube a ningún lado.
+- El TOKEN que sale caduca solo en minutos; aún así, no lo pegues en sitios públicos.

@@ -1,0 +1,19 @@
+# Dependencias
+node_modules/
+
+# Certificados y secretos — NUNCA subir al repo
+*.pfx
+*.p12
+*.pem
+*.key
+certificado.*
+.env
+.env.*
+
+# Tokens / salidas de prueba
+token*.txt
+*.log
+
+# Sistema
+.DS_Store
+Thumbs.db
