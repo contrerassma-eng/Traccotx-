@@ -57,6 +57,14 @@ Deno.serve(async (req: Request) => {
     if (!allowed && bearer) { const { data: ures } = await admin.auth.getUser(bearer); const em = ures?.user?.email?.toLowerCase(); if (em) { const { data: link } = await admin.from("tx_usuario_rut").select("rut").eq("email", em).eq("rut", rutContrib).maybeSingle(); allowed = !!link; } }
     if (!allowed) return json({ ok: false, error: "No autorizado para este RUT" }, 403);
 
+    // Ruta de la copia en almacenamiento (registro verificable de la descarga).
+    const path = rutContrib + "/" + folio + ".pdf";
+    // Si ya está guardado, lo servimos desde ahí (rápido, sin pedir al SII).
+    if (!inspect && url.searchParams.get("fresh") !== "1") {
+      const { data: cached } = await admin.storage.from("dte-pdf").download(path);
+      if (cached) { const b = new Uint8Array(await cached.arrayBuffer()); if (b.length > 4 && b[0] === 0x25 && b[1] === 0x50) return new Response(b, { headers: { "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="DTE-${folio}.pdf"`, "X-Tracco-Cache": "hit", ...cors } }); }
+    }
+
     // Datos del documento desde tx_facturas (emisor, tipo, periodo).
     const { data: fac } = await admin.from("tx_facturas").select("tipo_dte, rut_contraparte, periodo, fecha_emision").eq("rut", rutContrib).eq("tipo", "compra").eq("folio", folio).maybeSingle();
     if (!fac) return json({ ok: false, error: "No encuentro esa factura" }, 404);
@@ -89,7 +97,11 @@ Deno.serve(async (req: Request) => {
     const pdf = new Uint8Array(await pr.arrayBuffer());
     const esPdf = pdf.length > 4 && pdf[0] === 0x25 && pdf[1] === 0x50 && pdf[2] === 0x44 && pdf[3] === 0x46; // %PDF
     if (inspect) return json({ folio, tipo, emisor, codigo, status: pr.status, ct: pr.headers.get("content-type"), bytes: pdf.length, esPdf, muestra: esPdf ? "PDF!" : new TextDecoder("iso-8859-1").decode(pdf.slice(0, 200)).replace(/\s+/g, " ") });
-    if (esPdf) return new Response(pdf, { status: 200, headers: { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="DTE-${tipo}-${folio}.pdf"`, ...cors } });
+    if (esPdf) {
+      // Guardamos la copia (queda registro verificable de que se obtuvo el PDF).
+      await admin.storage.from("dte-pdf").upload(path, pdf, { contentType: "application/pdf", upsert: true }).catch(() => {});
+      return new Response(pdf, { status: 200, headers: { "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="DTE-${tipo}-${folio}.pdf"`, "X-Tracco-Cache": "miss", ...cors } });
+    }
     return json({ ok: false, error: "El SII no devolvió un PDF para ese documento." }, 502);
   } catch (e) {
     return json({ ok: false, error: (e as Error).message }, 500);

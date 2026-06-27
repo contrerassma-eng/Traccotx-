@@ -433,8 +433,10 @@ function Facturas({ rut, anio, catOpts }: { rut: string; anio: number; catOpts: 
       }
       const blob = await r.blob();
       const u = URL.createObjectURL(blob);
-      window.open(u, "_blank");
-      setTimeout(() => URL.revokeObjectURL(u), 60000);
+      const a = document.createElement("a");
+      a.href = u; a.download = `DTE-${f.folio}.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(u), 30000);
     } catch { alert("Error de red al pedir el PDF."); }
     finally { setPdfBusy(""); }
   }
