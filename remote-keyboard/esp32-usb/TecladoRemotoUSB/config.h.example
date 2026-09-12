@@ -1,0 +1,12 @@
+// Copia este archivo como config.h y completa tus datos (config.h no se sube al repo).
+// Todo es opcional: sin config.h el adaptador crea su propia red WiFi "TecladoRemoto"
+// y desde la página web puedes indicarle tu red de casa.
+
+#define WIFI_SSID   "MiRedWiFi"      // red WiFi de casa (la misma del teléfono)
+#define WIFI_PASS   "clave-secreta"
+
+#define AP_SSID     "TecladoRemoto"  // red propia del adaptador (siempre disponible)
+#define AP_PASS     "teclado123"     // mínimo 8 caracteres
+#define AP_ALWAYS   1                // 1 = mantener la red propia aunque conecte a casa; 0 = apagarla
+
+#define HOSTNAME    "teclado"        // http://teclado.local (mDNS)

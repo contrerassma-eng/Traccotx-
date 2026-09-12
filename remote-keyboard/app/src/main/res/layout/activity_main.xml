@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title"
+            android:textColor="@color/text"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:layout_marginBottom="18dp"
+            android:text="@string/subtitle"
+            android:textColor="@color/muted"
+            android:textSize="15sp" />
+
+        <!-- Paso 1 -->
+        <LinearLayout style="@style/Card">
+            <LinearLayout style="@style/CardHeader">
+                <TextView style="@style/CardTitle" android:text="@string/step1_title" />
+                <TextView android:id="@+id/status_step1" style="@style/CardStatus" />
+            </LinearLayout>
+            <TextView style="@style/CardDesc" android:text="@string/step1_desc" />
+            <Button android:id="@+id/btn_step1" style="@style/CardButton" android:text="@string/step1_button" />
+        </LinearLayout>
+
+        <!-- Paso 2 -->
+        <LinearLayout style="@style/Card">
+            <LinearLayout style="@style/CardHeader">
+                <TextView style="@style/CardTitle" android:text="@string/step2_title" />
+                <TextView android:id="@+id/status_step2" style="@style/CardStatus" />
+            </LinearLayout>
+            <TextView style="@style/CardDesc" android:text="@string/step2_desc" />
+            <Button android:id="@+id/btn_step2" style="@style/CardButton" android:text="@string/step2_button" />
+        </LinearLayout>
+
+        <!-- Paso 3 (opcional) -->
+        <LinearLayout style="@style/Card">
+            <LinearLayout style="@style/CardHeader">
+                <TextView style="@style/CardTitle" android:text="@string/step3_title" />
+                <TextView android:id="@+id/status_step3" style="@style/CardStatus" />
+            </LinearLayout>
+            <TextView style="@style/CardDesc" android:text="@string/step3_desc" />
+            <Button android:id="@+id/btn_step3" style="@style/CardButton" android:text="@string/step3_button" />
+        </LinearLayout>
+
+        <!-- Conexión -->
+        <LinearLayout style="@style/Card">
+            <TextView style="@style/CardTitle" android:text="@string/connect_title" />
+            <TextView style="@style/CardDesc" android:text="@string/connect_desc" />
+
+            <TextView
+                android:id="@+id/url"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:fontFamily="monospace"
+                android:gravity="center"
+                android:text="—"
+                android:textColor="@color/accent"
+                android:textIsSelectable="true"
+                android:textSize="30sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/url_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center"
+                android:textColor="@color/muted"
+                android:textSize="14sp" />
+
+            <ImageView
+                android:id="@+id/qr"
+                android:layout_width="220dp"
+                android:layout_height="220dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="14dp"
+                android:background="#FFFFFF"
+                android:contentDescription="@string/connect_title"
+                android:padding="8dp" />
+
+            <Button android:id="@+id/btn_refresh" style="@style/CardButton" android:text="@string/refresh" />
+        </LinearLayout>
+
+        <!-- Campo de prueba -->
+        <LinearLayout style="@style/Card">
+            <TextView style="@style/CardTitle" android:text="@string/test_title" />
+            <EditText
+                android:id="@+id/test_field"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@color/bg"
+                android:hint="@string/test_hint"
+                android:importantForAutofill="no"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:minLines="2"
+                android:padding="12dp"
+                android:textColor="@color/text"
+                android:textColorHint="@color/muted"
+                android:textSize="18sp" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>
