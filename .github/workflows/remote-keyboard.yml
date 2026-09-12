@@ -51,12 +51,14 @@ jobs:
           arduino-cli config init --overwrite --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
+          arduino-cli lib install WebSockets
 
       - name: Compilar para ESP32-S3 y ESP32-S2
         run: |
           SK=remote-keyboard/esp32-usb/TecladoRemotoUSB
-          arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc --output-dir out/s3 "$SK"
-          arduino-cli compile --fqbn esp32:esp32:esp32s2:CDCOnBoot=cdc --output-dir out/s2 "$SK"
+          # USB CDC apagado: el proyector ve únicamente un teclado HID.
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=default --output-dir out/s3 "$SK"
+          arduino-cli compile --fqbn esp32:esp32:esp32s2 --output-dir out/s2 "$SK"
           mkdir -p firmware
           cp out/s3/TecladoRemotoUSB.ino.merged.bin firmware/TecladoRemotoUSB-esp32s3.bin
           cp out/s2/TecladoRemotoUSB.ino.merged.bin firmware/TecladoRemotoUSB-esp32s2.bin

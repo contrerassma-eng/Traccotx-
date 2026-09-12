@@ -1,25 +1,39 @@
 /*
  * Teclado Remoto USB — firmware para ESP32-S2 / ESP32-S3
  * ------------------------------------------------------
- * El ESP32 se conecta al puerto USB del proyector y se presenta como un teclado
- * USB + control multimedia (HID). Un teléfono en la misma red WiFi abre la página
- * web que sirve el ESP32 y desde ahí escribe texto y pulsa todas las teclas de un
- * control remoto: flechas, OK, Volver, Inicio, Recientes, volumen, play/pausa…
+ * El ESP32 se conecta al puerto USB del proyector y, para el proyector, es
+ * simplemente un teclado USB + control multimedia (HID): no hay que instalar ni
+ * configurar nada allí, ni hace falta control remoto.
  *
- * No hay que instalar nada en el proyector: para Android es un teclado más.
+ * Al encenderse crea su propia red WiFi ("TecladoRemoto") con PORTAL CAUTIVO: al
+ * conectar el teléfono a esa red, la página de control se abre sola. Desde ahí se
+ * escribe texto y se pulsan todas las teclas de un control: flechas, OK, Volver,
+ * Inicio, Recientes, volumen, play/pausa, encendido…
+ *
+ * Los comandos viajan por WebSocket (puerto 81, baja latencia) con HTTP como
+ * respaldo. Opcionalmente también se une a la WiFi de casa.
  *
  * Placa:  ESP32-S2 o ESP32-S3 (USB nativo). El ESP32 clásico y el C3 NO sirven.
- * IDE:    Arduino IDE 2.x con el core "esp32" de Espressif (>= 2.0.5).
+ * IDE:    Arduino IDE 2.x con el core "esp32" de Espressif (>= 2.0.5) y la librería
+ *         "WebSockets" (Markus Sattler / Links2004) del Gestor de librerías.
  *         Herramientas → USB Mode → "USB-OTG (TinyUSB)"   (solo S3)
- *         Herramientas → USB CDC On Boot → "Enabled" (opcional, para ver el monitor serie)
+ *         Herramientas → USB CDC On Boot → "Disabled": así el proyector ve SOLO un
+ *         teclado (los mensajes de depuración salen por el puerto UART).
  *
- * API (misma que la app Android):
+ * API HTTP (misma que la app Android):
  *   GET  /              página web
  *   GET  /api/status    estado (JSON)
  *   POST /api/text      text=…            escribe texto (solo ASCII)
  *   POST /api/key       key=ENTER&count=1 tecla especial
  *   POST /api/clear     Ctrl+A + Retroceso
  *   POST /api/wifi      ssid=…&pass=…     guarda la red WiFi y reinicia
+ *
+ * WebSocket (ws://<ip>:81/), mensajes de texto separados por tabulador:
+ *   <id>\ttext\t<texto>        → <id>\t{"ok":true,...}
+ *   <id>\tkey\t<TECLA>\t<n>    → <id>\t{"ok":true,...}
+ *   <id>\tclear                → <id>\t{"ok":true,...}
+ *   <id>\tstatus               → <id>\t{estado JSON}
+ *   <id>\tping                 → <id>\t{"ok":true}
  */
 
 #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -31,8 +45,10 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <WebSocketsServer.h>
 #include "USB.h"
 #include "USBHIDKeyboard.h"
 #include "USBHIDConsumerControl.h"
@@ -60,20 +76,27 @@
 #define HOSTNAME "teclado"
 #endif
 
-#define VERSION "1.0-usb"
+#define VERSION "1.1-usb"
 #define HTTP_PORT 80
+#define WS_PORT 81
+#define DNS_PORT 53
 #define STA_TIMEOUT_MS 20000
 #define KEY_DELAY_MS 6
 
 USBHIDKeyboard Keyboard;
 USBHIDConsumerControl Consumer;
 WebServer server(HTTP_PORT);
+WebSocketsServer ws(WS_PORT);
+DNSServer dns;
 Preferences prefs;
 
 volatile bool usbMounted = false;
 bool apActive = false;
+bool dnsActive = false;
 String staSsid;
 unsigned long lastReconnect = 0;
+const IPAddress AP_IP(192, 168, 4, 1);
+const IPAddress AP_MASK(255, 255, 255, 0);
 
 // ---------------------------------------------------------------- teclas
 // usage HID "Consumer Control" (página 0x0C). Android los traduce a sus KEYCODE_*.
@@ -224,19 +247,66 @@ String jsonEscape(const String& s) {
   return out;
 }
 
-void sendJson(int code, const String& body) {
-  server.sendHeader("Cache-Control", "no-store");
-  server.send(code, "application/json; charset=utf-8", body);
-}
-
-void sendResult(bool ok, int dropped = 0) {
+String resultJson(bool ok, int dropped = 0, const String& error = "") {
   String j = "{\"ok\":";
   j += ok ? "true" : "false";
   j += ",\"imeAlive\":true,\"editorConnected\":true,\"usbMounted\":";
   j += usbMounted ? "true" : "false";
   if (dropped) { j += ",\"dropped\":"; j += dropped; }
+  if (error.length()) j += ",\"error\":\"" + jsonEscape(error) + "\"";
   j += "}";
-  sendJson(200, j);
+  return j;
+}
+
+String statusJson() {
+  bool sta = WiFi.status() == WL_CONNECTED;
+  String j = "{\"ok\":true,\"mode\":\"usb\",\"version\":\"" VERSION "\"";
+  j += ",\"usbMounted\":"; j += usbMounted ? "true" : "false";
+  j += ",\"imeAlive\":true,\"editorConnected\":true,\"accessibility\":true";
+  j += ",\"port\":" + String(HTTP_PORT);
+  j += ",\"ws\":" + String(WS_PORT);
+  j += ",\"hostname\":\"" HOSTNAME "\"";
+  j += ",\"ssid\":\"" + jsonEscape(staSsid) + "\"";
+  j += ",\"staConnected\":"; j += sta ? "true" : "false";
+  j += ",\"staIp\":\"" + (sta ? WiFi.localIP().toString() : String("")) + "\"";
+  j += ",\"ip\":\"" + (sta ? WiFi.localIP().toString() : (apActive ? WiFi.softAPIP().toString() : String(""))) + "\"";
+  j += ",\"apActive\":"; j += apActive ? "true" : "false";
+  j += ",\"captive\":"; j += dnsActive ? "true" : "false";
+  j += ",\"apSsid\":\"" AP_SSID "\"";
+  j += ",\"apIp\":\"" + (apActive ? WiFi.softAPIP().toString() : String("")) + "\"";
+  j += "}";
+  return j;
+}
+
+// --- comandos (compartidos por HTTP y WebSocket) ---------------------------
+
+String cmdText(const String& text) {
+  int dropped = typeText(text);
+  Serial.printf("[text] %d bytes, %d descartados\n", text.length(), dropped);
+  return resultJson(true, dropped);
+}
+
+String cmdKey(const String& name, int count, bool& found) {
+  if (count < 1) count = 1;
+  if (count > 500) count = 500;
+  const KeyDef* k = findKey(name);
+  found = k != nullptr;
+  if (!k) return resultJson(false, 0, "Tecla desconocida: " + name);
+  for (int i = 0; i < count; i++) pressKey(*k);
+  Serial.printf("[key] %s x%d\n", k->name, count);
+  return resultJson(true);
+}
+
+String cmdClear() {
+  clearField();
+  return resultJson(true);
+}
+
+// --- HTTP -------------------------------------------------------------------
+
+void sendJson(int code, const String& body) {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(code, "application/json; charset=utf-8", body);
 }
 
 void handleRoot() {
@@ -244,49 +314,66 @@ void handleRoot() {
   server.send_P(200, "text/html; charset=utf-8", WEB_PAGE);
 }
 
-void handleStatus() {
-  bool sta = WiFi.status() == WL_CONNECTED;
-  String j = "{\"ok\":true,\"mode\":\"usb\",\"version\":\"" VERSION "\"";
-  j += ",\"usbMounted\":"; j += usbMounted ? "true" : "false";
-  j += ",\"imeAlive\":true,\"editorConnected\":true,\"accessibility\":true";
-  j += ",\"port\":" + String(HTTP_PORT);
-  j += ",\"hostname\":\"" HOSTNAME "\"";
-  j += ",\"ssid\":\"" + jsonEscape(staSsid) + "\"";
-  j += ",\"staConnected\":"; j += sta ? "true" : "false";
-  j += ",\"staIp\":\"" + (sta ? WiFi.localIP().toString() : String("")) + "\"";
-  j += ",\"ip\":\"" + (sta ? WiFi.localIP().toString() : (apActive ? WiFi.softAPIP().toString() : String(""))) + "\"";
-  j += ",\"apActive\":"; j += apActive ? "true" : "false";
-  j += ",\"apSsid\":\"" AP_SSID "\"";
-  j += ",\"apIp\":\"" + (apActive ? WiFi.softAPIP().toString() : String("")) + "\"";
-  j += "}";
-  sendJson(200, j);
-}
+void handleStatus() { sendJson(200, statusJson()); }
 
-void handleText() {
-  String text = server.arg("text");
-  int dropped = typeText(text);
-  Serial.printf("[text] %d bytes, %d descartados\n", text.length(), dropped);
-  sendResult(true, dropped);
-}
+void handleText() { sendJson(200, cmdText(server.arg("text"))); }
 
 void handleKey() {
-  String name = server.arg("key");
-  int count = server.arg("count").toInt();
-  if (count < 1) count = 1;
-  if (count > 500) count = 500;
-  const KeyDef* k = findKey(name);
-  if (!k) {
-    sendJson(400, "{\"ok\":false,\"error\":\"Tecla desconocida: " + jsonEscape(name) + "\"}");
-    return;
-  }
-  for (int i = 0; i < count; i++) pressKey(*k);
-  Serial.printf("[key] %s x%d\n", k->name, count);
-  sendResult(true);
+  bool found;
+  String j = cmdKey(server.arg("key"), server.arg("count").toInt(), found);
+  sendJson(found ? 200 : 400, j);
 }
 
-void handleClear() {
-  clearField();
-  sendResult(true);
+void handleClear() { sendJson(200, cmdClear()); }
+
+/** Portal cautivo: cualquier URL que no sea nuestra redirige a la página. */
+void redirectToPortal() {
+  server.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/", true);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(302, "text/plain", "");
+}
+
+// --- WebSocket --------------------------------------------------------------
+
+void onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  if (type == WStype_CONNECTED) {
+    Serial.printf("[ws] cliente %u conectado\n", num);
+    return;
+  }
+  if (type != WStype_TEXT) return;
+
+  String msg;
+  msg.reserve(length);
+  msg.concat((const char*)payload, length);
+
+  // Formato: <id>\t<cmd>[\t<arg1>[\t<arg2>]]   (el texto va siempre al final)
+  int t1 = msg.indexOf('\t');
+  String id = t1 < 0 ? msg : msg.substring(0, t1);
+  String rest = t1 < 0 ? String("") : msg.substring(t1 + 1);
+  int t2 = rest.indexOf('\t');
+  String cmd = t2 < 0 ? rest : rest.substring(0, t2);
+  String args = t2 < 0 ? String("") : rest.substring(t2 + 1);
+
+  String reply;
+  if (cmd == "text") {
+    reply = cmdText(args);
+  } else if (cmd == "key") {
+    int t3 = args.indexOf('\t');
+    String name = t3 < 0 ? args : args.substring(0, t3);
+    int count = t3 < 0 ? 1 : args.substring(t3 + 1).toInt();
+    bool found;
+    reply = cmdKey(name, count, found);
+  } else if (cmd == "clear") {
+    reply = cmdClear();
+  } else if (cmd == "status") {
+    reply = statusJson();
+  } else if (cmd == "ping") {
+    reply = "{\"ok\":true}";
+  } else {
+    reply = resultJson(false, 0, "Comando desconocido: " + cmd);
+  }
+  String out = id + "\t" + reply;
+  ws.sendTXT(num, out);
 }
 
 void handleWifi() {
@@ -302,13 +389,19 @@ void handleWifi() {
     Serial.println("[wifi] red olvidada");
   }
   prefs.end();
-  sendResult(true);
+  sendJson(200, resultJson(true));
   delay(500);
   ESP.restart();
 }
 
 void handleNotFound() {
-  sendJson(404, "{\"ok\":false,\"error\":\"No encontrado\"}");
+  if (server.uri().startsWith("/api/")) {
+    sendJson(404, "{\"ok\":false,\"error\":\"No encontrado\"}");
+  } else if (apActive) {
+    redirectToPortal();  // detección de portal cautivo de Android / iOS / Windows
+  } else {
+    server.send(404, "text/plain", "No encontrado");
+  }
 }
 
 // ---------------------------------------------------------------- WiFi
@@ -320,11 +413,18 @@ void startWifi() {
 
   WiFi.persistent(false);
   WiFi.setHostname(HOSTNAME);
-  WiFi.mode(WIFI_AP_STA);
+  WiFi.mode(staSsid.length() ? WIFI_AP_STA : WIFI_AP);
 
-  // Red propia: siempre disponible como respaldo (o hasta conectar a casa si AP_ALWAYS = 0).
+  // Red propia con portal cautivo: es la forma principal de uso (no requiere
+  // ninguna otra red). Queda también como respaldo si se configura la de casa.
+  WiFi.softAPConfig(AP_IP, AP_IP, AP_MASK);
   apActive = WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.printf("[wifi] red propia '%s' -> http://%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+  if (apActive) {
+    dns.setErrorReplyCode(DNSReplyCode::NoError);
+    dnsActive = dns.start(DNS_PORT, "*", WiFi.softAPIP());
+  }
+  Serial.printf("[wifi] red propia '%s' -> http://%s (portal cautivo %s)\n", AP_SSID,
+                WiFi.softAPIP().toString().c_str(), dnsActive ? "activo" : "inactivo");
 
   if (staSsid.length()) {
     Serial.printf("[wifi] conectando a '%s'...\n", staSsid.c_str());
@@ -339,6 +439,8 @@ void startWifi() {
       Serial.printf("[wifi] conectado -> http://%s  (http://%s.local)\n",
                     WiFi.localIP().toString().c_str(), HOSTNAME);
 #if !AP_ALWAYS
+      dns.stop();
+      dnsActive = false;
       WiFi.softAPdisconnect(true);
       WiFi.mode(WIFI_STA);
       apActive = false;
@@ -377,12 +479,23 @@ void setup() {
   server.on("/api/key", HTTP_POST, handleKey);
   server.on("/api/clear", HTTP_POST, handleClear);
   server.on("/api/wifi", HTTP_POST, handleWifi);
+  // Rutas que usan los sistemas para detectar un portal cautivo.
+  const char* captive[] = {"/generate_204", "/gen_204", "/hotspot-detect.html",
+                           "/library/test/success.html", "/connecttest.txt", "/ncsi.txt",
+                           "/redirect", "/canonical.html", "/success.txt", "/fwlink"};
+  for (const char* path : captive) server.on(path, redirectToPortal);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("[http] servidor listo");
+
+  ws.onEvent(onWsEvent);
+  ws.begin();
+  Serial.printf("[ws] escuchando en el puerto %d\n", WS_PORT);
 }
 
 void loop() {
+  if (dnsActive) dns.processNextRequest();
+  ws.loop();
   server.handleClient();
 
   // Reintentar la conexión a casa cada 30 s si se perdió.

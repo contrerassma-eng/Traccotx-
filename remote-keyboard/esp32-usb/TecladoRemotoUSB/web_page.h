@@ -62,6 +62,11 @@ static const char WEB_PAGE[] PROGMEM = R"~~~(<!DOCTYPE html>
 
 <h1>⌨️ Teclado Remoto <small id="ver"></small></h1>
 
+<div class="card" id="captive-note" hidden style="border:1px solid rgba(56,189,248,.4)">
+  <b>Conectado por la red propia del adaptador.</b>
+  <p class="hint" id="captive-text">Si esta ventana se cierra, abre <b>http://192.168.4.1</b> en el navegador del teléfono.</p>
+</div>
+
 <div class="pills">
   <span class="pill" id="p-server">Conectando…</span>
   <span class="pill" id="p-ime">Teclado</span>
@@ -168,17 +173,60 @@ static const char WEB_PAGE[] PROGMEM = R"~~~(<!DOCTYPE html>
     clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms || 1800);
   }
 
+  // --- WebSocket (ESP32): baja latencia; si no está disponible se usa HTTP ---
+  let ws = null, wsReady = false, wsPort = 0, wsSeq = 0;
+  const wsPending = new Map();
+  function wsConnect(port) {
+    if (ws || !port) return;
+    try { ws = new WebSocket('ws://' + location.hostname + ':' + port + '/'); } catch (e) { ws = null; return; }
+    ws.onopen = () => { wsReady = true; offline = false; setPill('#p-server', 'ok', 'Conectado (WebSocket)'); };
+    ws.onmessage = (ev) => {
+      const i = ev.data.indexOf('\t');
+      const id = ev.data.slice(0, i);
+      const p = wsPending.get(id);
+      if (!p) return;
+      wsPending.delete(id);
+      try { p.resolve(JSON.parse(ev.data.slice(i + 1))); } catch (e) { p.reject(e); }
+    };
+    ws.onclose = ws.onerror = () => {
+      if (!ws) return;
+      ws = null; wsReady = false;
+      wsPending.forEach((p) => p.reject(new Error('ws cerrado')));
+      wsPending.clear();
+      setTimeout(() => wsConnect(wsPort), 1500);
+    };
+  }
+  function wsSend(path, body) {
+    return new Promise((resolve, reject) => {
+      const id = String(++wsSeq);
+      const cmd = path.replace('/api/', '');
+      let msg = id + '\t' + cmd;
+      if (cmd === 'key') msg += '\t' + body.key + '\t' + (body.count || 1);
+      else if (cmd === 'text') msg += '\t' + body.text;
+      wsPending.set(id, { resolve, reject });
+      try { ws.send(msg); } catch (e) { wsPending.delete(id); reject(e); return; }
+      setTimeout(() => { if (wsPending.has(id)) { wsPending.delete(id); reject(new Error('sin respuesta')); } }, 4000);
+    });
+  }
+  function httpSend(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body: new URLSearchParams(body || {}).toString()
+    }).then((r) => r.json());
+  }
+  function transport(path, body) {
+    if (wsReady && path !== '/api/wifi') return wsSend(path, body).catch(() => httpSend(path, body));
+    return httpSend(path, body);
+  }
+
   // --- Cola de peticiones: se envían en orden, una a la vez -----------------
   let chain = Promise.resolve();
   let offline = false;
   function api(path, body) {
     const p = chain.then(() =>
-      fetch(path, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-        body: new URLSearchParams(body || {}).toString()
-      }).then((r) => r.json()).then((j) => {
-        if (offline) { offline = false; setPill('#p-server', 'ok', 'Conectado'); }
+      transport(path, body).then((j) => {
+        if (offline) { offline = false; setPill('#p-server', 'ok', wsReady ? 'Conectado (WebSocket)' : 'Conectado'); }
         if (j && j.dropped) toast(j.dropped + ' carácter(es) no se pueden escribir por USB (solo ASCII, sin tildes ni ñ)');
         if (j && j.ok === false && j.error) toast('Error: ' + j.error);
         else if (j && j.ok === false && !j.imeAlive) toast('El teclado remoto no está seleccionado en el proyector');
@@ -283,8 +331,13 @@ static const char WEB_PAGE[] PROGMEM = R"~~~(<!DOCTYPE html>
   function poll() {
     fetch('/api/status', { cache: 'no-store' }).then((r) => r.json()).then((s) => {
       offline = false;
-      setPill('#p-server', 'ok', 'Conectado');
+      setPill('#p-server', 'ok', wsReady ? 'Conectado (WebSocket)' : 'Conectado');
       $('#ver').textContent = 'v' + s.version;
+      if (s.ws) { wsPort = s.ws; wsConnect(wsPort); }
+      const captive = !!(s.apActive && s.apIp && location.hostname === s.apIp);
+      $('#captive-note').hidden = !captive;
+      if (captive) $('#captive-text').innerHTML = 'Si esta ventana se cierra, abre <b>http://' + s.apIp + '</b> en el navegador del teléfono.' +
+        (s.staConnected && s.staIp ? ' También está en tu red WiFi: <b>http://' + s.staIp + '</b>.' : '');
       if (s.mode === 'usb') {
         setPill('#p-ime', s.usbMounted ? 'ok' : 'bad', s.usbMounted ? 'Teclado USB conectado' : 'Cable USB no detectado');
         setPill('#p-editor', '', 'Modo USB: escribe donde esté el cursor');

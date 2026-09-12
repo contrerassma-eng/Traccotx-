@@ -1,9 +1,14 @@
 # Teclado Remoto por WiFi para proyector Android
 
 Control de teclado (y de todos los botones de un control remoto) para un proyector
-Android sin teclado, desde el navegador del teléfono o del computador conectado a la
-**misma red WiFi**. No hay que instalar nada en el teléfono: se abre una dirección
-en el navegador y listo.
+Android **sin teclado ni control remoto**, desde el navegador del teléfono. No hay que
+instalar nada en el teléfono ni en el proyector.
+
+**Vía recomendada (Opción B):** un ESP32-S3 enchufado al USB del proyector. Para el
+proyector es solo un teclado USB; el ESP32 crea su propia red WiFi con portal cautivo:
+al conectar el teléfono a esa red, la página de control se abre sola y desde ahí
+pulsas botones (flechas, OK, Volver, Inicio, volumen…) y escribes texto. Los comandos
+van por WebSocket local.
 
 Hay **dos formas** de usarlo; la página web de control es la misma en ambas:
 
@@ -17,9 +22,10 @@ Hay **dos formas** de usarlo; la página web de control es la misma en ambas:
 | Encender / apagar | ❌ | ✅ (tecla Power por USB, si el proyector la respeta) |
 | Requisitos | Poder instalar APKs (pendrive o descarga) | Un **ESP32-S2 o ESP32-S3** (USB nativo). El ESP32 clásico y el C3 **no** sirven |
 
-> Si ya probaste un teclado numérico USB en el proyector y funcionó, la opción B es la
-> más completa: para Android el ESP32 es simplemente un teclado + control multimedia USB.
-> Puedes usar las dos a la vez.
+> Sin control remoto no hay forma de navegar el proyector para instalar un APK, así que
+> empieza por la opción B. Una vez que el ESP32 funcione como teclado ya puedes moverte
+> por todo el sistema y, si quieres tildes y ñ, instalar después la app (opción A) con
+> el propio ESP32 como teclado. Las dos pueden convivir.
 
 ---
 
@@ -78,8 +84,10 @@ Para volver al teclado normal del proyector: Ajustes → Teclados → elegir el 
 
 ## Opción B · Adaptador USB con ESP32 (`esp32-usb/`)
 
-El ESP32 se enchufa al puerto USB del proyector y se presenta como **teclado USB + control
-multimedia (HID)**. Recibe las órdenes por WiFi desde la misma página web.
+El ESP32 se enchufa al puerto USB del proyector y se presenta **únicamente** como teclado
+USB + control multimedia (HID): sin puerto serie ni otras interfaces, igual que un teclado
+normal. Recibe las órdenes por WiFi desde la misma página web, por **WebSocket** (puerto 81,
+baja latencia) con HTTP como respaldo.
 
 ### Hardware
 
@@ -100,24 +108,32 @@ multimedia (HID)**. Recibe las órdenes por WiFi desde la misma página web.
 
 **Con Arduino IDE 2.x:**
 
-1. Instala el core «esp32» de Espressif (Gestor de placas, versión ≥ 2.0.5).
+1. Instala el core «esp32» de Espressif (Gestor de placas, versión ≥ 2.0.5) y la librería
+   **WebSockets** de Markus Sattler (Gestor de librerías).
 2. Abre `esp32-usb/TecladoRemotoUSB/TecladoRemotoUSB.ino`.
 3. Placa: *ESP32S3 Dev Module* (o *ESP32S2 Dev Module*). En **Herramientas**:
-   *USB Mode → USB-OTG (TinyUSB)* (solo S3) y *USB CDC On Boot → Enabled*.
+   *USB Mode → USB-OTG (TinyUSB)* (solo S3) y *USB CDC On Boot → Disabled* (así el proyector
+   ve solo un teclado; los mensajes de depuración salen por el puerto UART de la placa).
 4. Opcional: copia `config.h.example` como `config.h` con tu red WiFi.
-5. Sube.
+5. Sube (con *USB CDC On Boot* apagado, para subir de nuevo mantén **BOOT** y pulsa **RESET**).
 
-### Configurar la WiFi y usar
+### Usar (sin control remoto, sin tocar el proyector)
 
-1. Al arrancar, el adaptador crea su propia red **`TecladoRemoto`** (clave `teclado123`).
-   Conecta el teléfono a esa red y abre **http://192.168.4.1**.
-2. En la tarjeta «WiFi del adaptador USB» escribe el nombre y la clave de tu red de casa y
-   pulsa *Guardar y reiniciar*. El adaptador se une a tu red y **sigue ofreciendo** su red
-   propia como respaldo; al volver a entrar por `TecladoRemoto` verás la dirección que le tocó
-   en tu red (por ejemplo `http://192.168.1.77`). Desde un PC también sirve `http://teclado.local`.
-3. Enchufa el adaptador al proyector, abre la dirección en el teléfono y usa la página. Todo
-   funciona en cualquier pantalla del proyector (menús, ajustes, apps): flechas, OK, Volver,
-   Inicio, Recientes, volumen, play/pausa, power.
+1. Enchufa el ESP32 al USB del proyector. Se enciende y crea la red WiFi
+   **`TecladoRemoto`** (clave `teclado123`).
+2. En el teléfono, conéctate a esa red. Por el **portal cautivo** aparece sola la página de
+   control («Iniciar sesión en la red» / «Sign in»). Si se cierra, abre **http://192.168.4.1**
+   en el navegador. El teléfono no tiene Internet mientras está en esa red (usará datos
+   móviles si los tiene).
+3. Pulsa botones: flechas y OK para navegar, Volver, Inicio, Recientes, volumen, play/pausa,
+   encender/apagar. Escribe en «Escritura en vivo» cuando el cursor esté en un campo de texto
+   del proyector. Funciona en cualquier pantalla (menús, ajustes, apps).
+
+**Opcional: usar tu WiFi de casa** (para no cambiar de red en el teléfono). En la tarjeta
+«WiFi del adaptador USB» escribe el nombre y la clave de tu red y pulsa *Guardar y
+reiniciar*. El adaptador se une a tu red y **sigue ofreciendo** la red propia como respaldo;
+al volver a entrar por `TecladoRemoto` verás la dirección que le tocó en tu red (por
+ejemplo `http://192.168.1.77`). Desde un PC también sirve `http://teclado.local`.
 
 Limitación: por USB solo se pueden escribir caracteres ASCII (el proyector usa distribución de
 teclado US). La página avisa si descartó tildes o ñ; para esos casos usa la app Android.
@@ -135,7 +151,19 @@ teclado US). La página avisa si descartó tildes o ñ; para esos casos usa la a
 | POST | `/api/clear` | — | Borra todo el campo con foco |
 | POST | `/api/wifi` | `ssid`, `pass` | Solo ESP32: guarda la red y reinicia (`ssid` vacío = olvidar) |
 
-Ejemplo: `curl -d "key=ENTER" http://192.168.1.50:8765/api/key`
+Ejemplo: `curl -d "key=ENTER" http://192.168.4.1/api/key`
+
+**WebSocket (solo ESP32)**: `ws://<ip>:81/`, mensajes de texto separados por tabulador,
+respuesta con el mismo `id` seguido del JSON:
+
+```
+1<TAB>text<TAB>hola mundo      →  1<TAB>{"ok":true,...}
+2<TAB>key<TAB>DOWN<TAB>3       →  2<TAB>{"ok":true,...}
+3<TAB>clear                    →  3<TAB>{"ok":true,...}
+4<TAB>status                   →  4<TAB>{estado JSON}
+```
+
+La página usa WebSocket cuando `/api/status` devuelve `ws` y cae a HTTP si se corta.
 
 ## Estructura
 
@@ -154,5 +182,6 @@ Si modificas `index.html`, ejecuta `python3 tools/gen_web_page.py` para actualiz
 
 ## Seguridad
 
-El servidor no pide contraseña: cualquiera en tu red WiFi que conozca la dirección puede
-escribir en el proyector. Está pensado para la red doméstica; no abras el puerto a Internet.
+El servidor no pide contraseña: cualquiera en la misma red que conozca la dirección puede
+escribir en el proyector. La red propia del ESP32 está protegida por la clave `AP_PASS`
+(cámbiala en `config.h`). Está pensado para uso doméstico; no abras el puerto a Internet.
