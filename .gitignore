@@ -21,3 +21,11 @@ supabase/.branches/
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Teclado Remoto (Android + ESP32)
+remote-keyboard/.gradle/
+remote-keyboard/build/
+remote-keyboard/app/build/
+remote-keyboard/local.properties
+remote-keyboard/esp32-usb/TecladoRemotoUSB/config.h
+*.apk

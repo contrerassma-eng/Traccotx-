@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- cuerpo -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,38 h48 a6,6 0 0 1 6,6 v20 a6,6 0 0 1 -6,6 h-48 a6,6 0 0 1 -6,-6 v-20 a6,6 0 0 1 6,-6 z" />
+    <!-- fila 1 -->
+    <path android:fillColor="#0F172A" android:pathData="M31,43 h5 v5 h-5 z M38,43 h5 v5 h-5 z M45,43 h5 v5 h-5 z M52,43 h5 v5 h-5 z M59,43 h5 v5 h-5 z M66,43 h5 v5 h-5 z M73,43 h5 v5 h-5 z" />
+    <!-- fila 2 -->
+    <path android:fillColor="#0F172A" android:pathData="M34,50 h5 v5 h-5 z M41,50 h5 v5 h-5 z M48,50 h5 v5 h-5 z M55,50 h5 v5 h-5 z M62,50 h5 v5 h-5 z M69,50 h5 v5 h-5 z" />
+    <!-- fila 3: barra espaciadora -->
+    <path android:fillColor="#0F172A" android:pathData="M34,57 h5 v5 h-5 z M41,57 h26 v5 h-26 z M69,57 h5 v5 h-5 z" />
+    <!-- ondas WiFi -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,29 m-2.5,0 a2.5,2.5 0 1 0 5,0 a2.5,2.5 0 1 0 -5,0" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M47,25 a10,10 0 0 1 14,0" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M42,20 a17,17 0 0 1 24,0" />
+</vector>

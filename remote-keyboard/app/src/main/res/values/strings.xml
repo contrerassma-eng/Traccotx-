@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Teclado Remoto</string>
+    <string name="ime_label">Teclado Remoto (WiFi)</string>
+    <string name="ime_subtype_label">Teclado Remoto</string>
+    <string name="a11y_label">Teclado Remoto – Botones del sistema</string>
+    <string name="a11y_description">Permite que el Teclado Remoto envíe Volver, Inicio y Recientes, y mueva el foco entre elementos cuando no hay ningún campo de texto seleccionado. No lee ni guarda el contenido de la pantalla.</string>
+
+    <string name="title">Teclado Remoto por WiFi</string>
+    <string name="subtitle">Escribe en este dispositivo desde el navegador de tu teléfono o computador, en la misma red WiFi.</string>
+
+    <string name="step1_title">1. Activar el teclado</string>
+    <string name="step1_desc">Abre los ajustes de teclados y activa «Teclado Remoto (WiFi)».</string>
+    <string name="step1_button">Abrir ajustes de teclado</string>
+
+    <string name="step2_title">2. Seleccionar el teclado</string>
+    <string name="step2_desc">Elige «Teclado Remoto (WiFi)» como teclado actual.</string>
+    <string name="step2_button">Elegir teclado</string>
+
+    <string name="step3_title">3. (Opcional) Botones del sistema</string>
+    <string name="step3_desc">Activa el servicio de accesibilidad para poder usar Volver, Inicio y Recientes desde el teléfono.</string>
+    <string name="step3_button">Abrir ajustes de accesibilidad</string>
+
+    <string name="connect_title">4. Conectar desde el teléfono</string>
+    <string name="connect_desc">Abre esta dirección en el navegador del teléfono (misma red WiFi) o escanea el código QR:</string>
+    <string name="server_stopped">El servidor aún no está corriendo. Completa los pasos 1 y 2.</string>
+    <string name="no_network">Sin conexión WiFi. Conecta este dispositivo a la red primero.</string>
+
+    <string name="test_title">Campo de prueba</string>
+    <string name="test_hint">Toca aquí y escribe desde el teléfono…</string>
+
+    <string name="status_done">✅ Listo</string>
+    <string name="status_pending">⬜ Pendiente</string>
+    <string name="status_optional">Opcional</string>
+    <string name="refresh">Actualizar estado</string>
+
+    <string name="strip_waiting">⌨ Teclado Remoto · abre %1$s en tu teléfono</string>
+    <string name="strip_connected">⌨ Teclado Remoto · conectado desde %1$s</string>
+    <string name="strip_no_network">⌨ Teclado Remoto · sin WiFi</string>
+</resources>

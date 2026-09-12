@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Teclado Remoto</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg:#0f172a; --card:#1e293b; --card2:#273449; --text:#f1f5f9; --muted:#94a3b8;
+    --accent:#38bdf8; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding:12px 12px calc(24px + env(safe-area-inset-bottom)); max-width:640px; margin:0 auto; }
+  h1 { font-size:20px; margin:4px 0 10px; display:flex; align-items:center; gap:8px; }
+  h1 small { font-weight:normal; color:var(--muted); font-size:13px; }
+  .pills { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+  .pill { font-size:12.5px; padding:4px 10px; border-radius:999px; background:var(--card); color:var(--muted);
+    border:1px solid transparent; }
+  .pill.ok { color:var(--ok); border-color:rgba(74,222,128,.35); }
+  .pill.warn { color:var(--warn); border-color:rgba(251,191,36,.35); }
+  .pill.bad { color:var(--bad); border-color:rgba(248,113,113,.35); }
+  .card { background:var(--card); border-radius:14px; padding:12px; margin-bottom:12px; }
+  .card h2 { font-size:14px; margin:0 0 8px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  input[type=text], textarea { width:100%; font-size:17px; padding:12px; border-radius:10px; border:1px solid #334155;
+    background:var(--bg); color:var(--text); outline:none; }
+  input[type=text]:focus, textarea:focus { border-color:var(--accent); }
+  textarea { min-height:96px; resize:vertical; }
+  button { font-size:16px; font-weight:600; padding:13px 8px; border:0; border-radius:10px; background:var(--card2);
+    color:var(--text); cursor:pointer; user-select:none; -webkit-user-select:none; touch-action:manipulation; }
+  button:active { filter:brightness(1.3); transform:scale(.98); }
+  button.primary { background:var(--accent); color:var(--bg); }
+  button.danger { background:#7f1d1d; }
+  button.small { font-size:13px; padding:8px 6px; font-weight:500; }
+  .grid { display:grid; gap:8px; }
+  .g3 { grid-template-columns:repeat(3, 1fr); }
+  .g4 { grid-template-columns:repeat(4, 1fr); }
+  .dpad { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; max-width:260px; margin:0 auto; }
+  .dpad button { aspect-ratio:1.4; font-size:22px; }
+  .mt { margin-top:8px; }
+  .hint { font-size:13px; color:var(--muted); margin:6px 0 0; }
+  label.chk { display:flex; align-items:center; gap:8px; font-size:14px; color:var(--muted); margin-top:8px; }
+  #toast { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); background:#111827; color:#fff;
+    padding:10px 16px; border-radius:10px; font-size:14px; opacity:0; transition:opacity .2s; pointer-events:none;
+    max-width:90vw; text-align:center; }
+  #toast.show { opacity:1; }
+  details summary { cursor:pointer; color:var(--muted); font-size:14px; }
+</style>
+</head>
+<body>
+
+<h1>⌨️ Teclado Remoto <small id="ver"></small></h1>
+
+<div class="pills">
+  <span class="pill" id="p-server">Conectando…</span>
+  <span class="pill" id="p-ime">Teclado</span>
+  <span class="pill" id="p-editor">Campo de texto</span>
+  <span class="pill" id="p-a11y">Botones del sistema</span>
+</div>
+
+<div class="card">
+  <h2>Escritura en vivo</h2>
+  <input type="text" id="live" placeholder="Escribe aquí: cada letra se envía al instante"
+         autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send">
+  <div class="row mt">
+    <button class="primary" data-key="ENTER">Enter ⏎</button>
+    <button id="bs" data-key="BACKSPACE">Borrar ⌫</button>
+    <button data-key="SPACE">Espacio</button>
+  </div>
+  <div class="row mt">
+    <button class="small" id="clear-local">Limpiar este campo</button>
+    <button class="small danger" id="clear-remote">Borrar todo en el proyector</button>
+  </div>
+  <label class="chk"><input type="checkbox" id="clear-on-enter" checked> Limpiar este campo al pulsar Enter</label>
+  <p class="hint">Primero selecciona un campo de texto en el proyector (con el control remoto). Lo que escribas aquí aparecerá allá.</p>
+</div>
+
+<div class="card">
+  <h2>Enviar un texto completo</h2>
+  <textarea id="bulk" placeholder="Ideal para contraseñas WiFi, correos o direcciones largas…"></textarea>
+  <div class="row mt">
+    <button class="primary" id="send-bulk">Enviar</button>
+    <button id="send-bulk-enter">Enviar + Enter</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Navegación</h2>
+  <div class="dpad">
+    <span></span><button data-key="UP">▲</button><span></span>
+    <button data-key="LEFT">◀</button><button data-key="CENTER" class="primary">OK</button><button data-key="RIGHT">▶</button>
+    <span></span><button data-key="DOWN">▼</button><span></span>
+  </div>
+  <div class="grid g3 mt">
+    <button data-key="BACK" data-needs="a11y">← Volver</button>
+    <button data-key="HOME" data-needs="a11y">⌂ Inicio</button>
+    <button data-key="RECENTS" data-needs="a11y">Recientes</button>
+  </div>
+  <div class="grid g4 mt">
+    <button data-key="TAB" class="small">Tab ⇥</button>
+    <button data-key="ESC" class="small">Esc</button>
+    <button data-key="MENU" class="small">Menú</button>
+    <button data-key="SEARCH" class="small">🔍 Buscar</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Volumen y reproducción</h2>
+  <div class="grid g3">
+    <button data-key="VOL_DOWN">🔉 Vol −</button>
+    <button data-key="MUTE">🔇 Silencio</button>
+    <button data-key="VOL_UP">🔊 Vol +</button>
+  </div>
+  <div class="grid g3 mt">
+    <button data-key="PREVIOUS" class="small">⏮ Anterior</button>
+    <button data-key="PLAY_PAUSE" class="small">⏯ Play / Pausa</button>
+    <button data-key="NEXT" class="small">⏭ Siguiente</button>
+  </div>
+  <div class="row mt" id="usb-extra" hidden>
+    <button data-key="POWER" class="danger">⏻ Encender / Apagar</button>
+  </div>
+</div>
+
+<div class="card" id="wifi-card" hidden>
+  <h2>WiFi del adaptador USB (ESP32)</h2>
+  <p class="hint" id="wifi-info"></p>
+  <input type="text" id="wifi-ssid" placeholder="Nombre de la red WiFi (SSID)" autocomplete="off" autocapitalize="off">
+  <input type="text" id="wifi-pass" class="mt" placeholder="Contraseña de la red" autocomplete="off" autocapitalize="off">
+  <div class="row mt">
+    <button class="primary" id="wifi-save">Guardar y reiniciar</button>
+    <button class="small danger" id="wifi-forget">Olvidar red</button>
+  </div>
+  <p class="hint">Tras reiniciar, el adaptador se conecta a tu red WiFi. Su dirección aparece aquí (conectándote a la red «TecladoRemoto») o, si tu red lo permite, en <b>http://teclado.local</b>.</p>
+</div>
+
+<div class="card">
+  <details>
+    <summary>Ayuda</summary>
+    <p class="hint">• <b>Teclado</b>: en el proyector, elige «Teclado Remoto (WiFi)» como teclado (paso 2 de la app).<br>
+    • <b>Campo de texto</b>: aparece «listo» cuando hay un cuadro de texto seleccionado en el proyector.<br>
+    • <b>Volver / Inicio / Recientes</b>: requieren activar el servicio de accesibilidad (paso 3 de la app).<br>
+    • Las flechas y OK funcionan dentro de la app que tenga un campo de texto activo; con accesibilidad, también fuera.<br>
+    • Si «Enviar» no escribe nada, toca primero el campo de destino con el control remoto del proyector.<br>
+    • <b>Modo USB (ESP32)</b>: el adaptador actúa como teclado USB; funciona en todo el sistema sin instalar nada en el proyector, pero sólo escribe caracteres ASCII (sin tildes ni ñ).</p>
+  </details>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  const $ = (s) => document.querySelector(s);
+  const toastEl = $('#toast');
+  let toastTimer;
+  function toast(msg, ms) {
+    toastEl.textContent = msg; toastEl.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms || 1800);
+  }
+
+  // --- Cola de peticiones: se envían en orden, una a la vez -----------------
+  let chain = Promise.resolve();
+  let offline = false;
+  function api(path, body) {
+    const p = chain.then(() =>
+      fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams(body || {}).toString()
+      }).then((r) => r.json()).then((j) => {
+        if (offline) { offline = false; setPill('#p-server', 'ok', 'Conectado'); }
+        if (j && j.dropped) toast(j.dropped + ' carácter(es) no se pueden escribir por USB (solo ASCII, sin tildes ni ñ)');
+        if (j && j.ok === false && j.error) toast('Error: ' + j.error);
+        else if (j && j.ok === false && !j.imeAlive) toast('El teclado remoto no está seleccionado en el proyector');
+        else if (j && j.ok === false && !j.editorConnected) toast('Selecciona un campo de texto en el proyector');
+        return j;
+      }).catch((e) => {
+        offline = true;
+        setPill('#p-server', 'bad', 'Sin conexión');
+        throw e;
+      })
+    );
+    chain = p.catch(() => {});
+    return p;
+  }
+  const sendKey = (key, count) => api('/api/key', { key, count: count || 1 });
+  const sendText = (text) => api('/api/text', { text });
+
+  // --- Escritura en vivo (diff contra lo ya enviado) ------------------------
+  const live = $('#live');
+  let mirror = [];   // lo que ya se envió, en puntos de código
+  live.addEventListener('input', () => {
+    const now = Array.from(live.value);
+    let common = 0;
+    while (common < mirror.length && common < now.length && mirror[common] === now[common]) common++;
+    const del = mirror.length - common;
+    const add = now.slice(common).join('');
+    mirror = now;
+    if (del > 0) sendKey('BACKSPACE', del);
+    if (add) sendText(add);
+  });
+  live.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      pressEnter();
+    } else if (e.key === 'Backspace' && live.value === '') {
+      // Campo local vacío: borrar en el proyector.
+      e.preventDefault();
+      sendKey('BACKSPACE');
+    }
+  });
+  function pressEnter() {
+    sendKey('ENTER');
+    if ($('#clear-on-enter').checked) { live.value = ''; mirror = []; }
+  }
+  $('#clear-local').addEventListener('click', () => { live.value = ''; mirror = []; live.focus(); });
+  $('#clear-remote').addEventListener('click', () => {
+    api('/api/clear').then((j) => { if (j && j.ok) { live.value = ''; mirror = []; toast('Campo borrado'); } });
+  });
+
+  // --- Texto completo --------------------------------------------------------
+  const bulk = $('#bulk');
+  function sendBulk(withEnter) {
+    const t = bulk.value;
+    if (!t) { toast('Escribe algo primero'); return; }
+    sendText(t).then((j) => {
+      if (j && j.ok) {
+        toast(withEnter ? 'Enviado + Enter' : 'Enviado');
+        if (withEnter) sendKey('ENTER');
+      }
+    });
+  }
+  $('#send-bulk').addEventListener('click', () => sendBulk(false));
+  $('#send-bulk-enter').addEventListener('click', () => sendBulk(true));
+
+  // --- Botones de teclas -----------------------------------------------------
+  document.querySelectorAll('button[data-key]').forEach((b) => {
+    const key = b.dataset.key;
+    let holdTimer = null, repeatTimer = null, held = false;
+    const start = (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      held = false;
+      if (key === 'ENTER') return;
+      holdTimer = setTimeout(() => {
+        held = true;
+        repeatTimer = setInterval(() => sendKey(key), key === 'BACKSPACE' ? 70 : 140);
+      }, 450);
+    };
+    const stop = () => { clearTimeout(holdTimer); clearInterval(repeatTimer); holdTimer = repeatTimer = null; };
+    b.addEventListener('pointerdown', start);
+    b.addEventListener('pointerup', stop);
+    b.addEventListener('pointercancel', stop);
+    b.addEventListener('pointerleave', stop);
+    b.addEventListener('click', () => {
+      if (held) { held = false; return; }
+      if (key === 'ENTER') pressEnter();
+      else if (key === 'BACKSPACE') {
+        if (live.value) { const now = Array.from(live.value); now.pop(); live.value = now.join(''); }
+        if (mirror.length) mirror.pop();
+        sendKey('BACKSPACE');
+      } else if (key === 'SPACE') {
+        live.value += ' '; mirror.push(' '); sendText(' ');
+      } else {
+        sendKey(key);
+      }
+    });
+  });
+
+  // --- Estado ----------------------------------------------------------------
+  function setPill(sel, cls, text) {
+    const el = $(sel); el.className = 'pill ' + (cls || ''); el.textContent = text;
+  }
+  function poll() {
+    fetch('/api/status', { cache: 'no-store' }).then((r) => r.json()).then((s) => {
+      offline = false;
+      setPill('#p-server', 'ok', 'Conectado');
+      $('#ver').textContent = 'v' + s.version;
+      if (s.mode === 'usb') {
+        setPill('#p-ime', s.usbMounted ? 'ok' : 'bad', s.usbMounted ? 'Teclado USB conectado' : 'Cable USB no detectado');
+        setPill('#p-editor', '', 'Modo USB: escribe donde esté el cursor');
+        setPill('#p-a11y', 'ok', 'Botones del sistema listos');
+        $('#usb-extra').hidden = false;
+        showWifi(s);
+        return;
+      }
+      if (s.imeAlive) setPill('#p-ime', 'ok', 'Teclado activo');
+      else if (s.imeEnabled) setPill('#p-ime', 'warn', 'Teclado no seleccionado (paso 2)');
+      else setPill('#p-ime', 'bad', 'Teclado no activado (paso 1)');
+      if (s.editorConnected) setPill('#p-editor', 'ok', 'Campo de texto listo');
+      else setPill('#p-editor', 'warn', 'Selecciona un campo de texto');
+      if (s.accessibility) setPill('#p-a11y', 'ok', 'Botones del sistema listos');
+      else setPill('#p-a11y', '', 'Volver/Inicio: activa accesibilidad (paso 3)');
+    }).catch(() => {
+      offline = true;
+      setPill('#p-server', 'bad', 'Sin conexión con el proyector');
+    });
+  }
+  // --- WiFi del ESP32 --------------------------------------------------------
+  let wifiShown = false;
+  function showWifi(s) {
+    const card = $('#wifi-card');
+    card.hidden = false;
+    const parts = [];
+    if (s.ssid) parts.push('Red: ' + s.ssid + (s.staConnected ? ' ✔' : ' (sin conexión)'));
+    if (s.staIp) parts.push('Dirección en tu red: http://' + s.staIp);
+    if (s.apActive) parts.push('Red propia «' + s.apSsid + '»: http://' + s.apIp);
+    if (s.hostname) parts.push('Nombre: http://' + s.hostname + '.local');
+    $('#wifi-info').textContent = parts.join(' · ');
+    if (!wifiShown) { wifiShown = true; if (s.ssid) $('#wifi-ssid').value = s.ssid; }
+  }
+  $('#wifi-save').addEventListener('click', () => {
+    const ssid = $('#wifi-ssid').value.trim();
+    if (!ssid) { toast('Escribe el nombre de la red'); return; }
+    api('/api/wifi', { ssid, pass: $('#wifi-pass').value }).then(() => toast('Guardado. Reiniciando el adaptador…', 4000));
+  });
+  $('#wifi-forget').addEventListener('click', () => {
+    api('/api/wifi', { ssid: '', pass: '' }).then(() => toast('Red olvidada. Reiniciando…', 4000));
+  });
+
+  poll();
+  setInterval(poll, 2500);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+})();
+</script>
+</body>
+</html>

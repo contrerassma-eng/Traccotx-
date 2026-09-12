@@ -22,12 +22,20 @@ litros por folio.
 **Hallazgo de negocio:** el contribuyente no estaba recuperando ~$266.000/mes de
 crédito IEPD (código 544). Confirmado con enero 2025.
 
+## Teclado Remoto para proyector Android
+
+En [`remote-keyboard/`](remote-keyboard/README.md) hay un proyecto independiente: una app
+Android (teclado por WiFi) y un firmware para ESP32-S2/S3 (teclado USB por WiFi) para
+controlar un proyector Android sin teclado desde el navegador del teléfono. Se compila
+automáticamente en GitHub Actions (workflow *Teclado Remoto*).
+
 ## Estructura
 
 ```
 supabase/functions/tracco-auth-test/index.ts   Edge Function viva (v8): auth + compras + litros
 docs/HANDOFF.md                                 Handoff técnico completo (arquitectura, riesgos, roadmap)
 auth/                                           Prueba 1 original: scripts Node standalone de autenticación
+remote-keyboard/                                Teclado Remoto (app Android + firmware ESP32) — ver su README
   pfx.js  sii-auth.js  test-auth.js  package.json  LEEME.txt
 .env.example                                    Nombres de secretos/variables (sin valores)
 ```

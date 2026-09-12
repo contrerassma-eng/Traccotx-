@@ -1,0 +1,94 @@
+name: Teclado Remoto (APK + firmware ESP32)
+
+on:
+  push:
+    paths:
+      - "remote-keyboard/**"
+      - ".github/workflows/remote-keyboard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    name: APK Android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0"
+
+      - name: Compilar APK (debug, firmado automáticamente)
+        working-directory: remote-keyboard
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk TecladoRemoto.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TecladoRemoto-apk
+          path: remote-keyboard/TecladoRemoto.apk
+
+  firmware:
+    name: Firmware ESP32 (USB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Instalar core ESP32
+        run: |
+          arduino-cli config init --overwrite --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
+      - name: Compilar para ESP32-S3 y ESP32-S2
+        run: |
+          SK=remote-keyboard/esp32-usb/TecladoRemotoUSB
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc --output-dir out/s3 "$SK"
+          arduino-cli compile --fqbn esp32:esp32:esp32s2:CDCOnBoot=cdc --output-dir out/s2 "$SK"
+          mkdir -p firmware
+          cp out/s3/TecladoRemotoUSB.ino.merged.bin firmware/TecladoRemotoUSB-esp32s3.bin
+          cp out/s2/TecladoRemotoUSB.ino.merged.bin firmware/TecladoRemotoUSB-esp32s2.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TecladoRemotoUSB-firmware
+          path: firmware/*.bin
+
+  release:
+    name: Publicar release "teclado-remoto-latest"
+    needs: [apk, firmware]
+    if: github.event_name == 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: teclado-remoto-latest
+          name: Teclado Remoto (última compilación)
+          prerelease: true
+          body: |
+            Compilación automática de `remote-keyboard/`.
+
+            - **TecladoRemoto.apk**: app para instalar en el proyector Android.
+            - **TecladoRemotoUSB-esp32s3.bin / -esp32s2.bin**: firmware para grabar en un ESP32-S3 / S2
+              (imagen completa, dirección 0x0) con https://espressif.github.io/esptool-js/
+
+            Instrucciones: `remote-keyboard/README.md`.
+          files: |
+            dist/TecladoRemoto-apk/TecladoRemoto.apk
+            dist/TecladoRemotoUSB-firmware/*.bin
